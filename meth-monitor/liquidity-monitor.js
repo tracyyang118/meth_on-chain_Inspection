@@ -128,6 +128,6 @@ checkLiquidityRunRisk();
 // ==========================================
 // 6. 设置执行频率：每 15 分钟循环执行一次
 // ==========================================
-const FIFTEEN_MINUTES = 15 * 60 * 1000;
-setInterval(checkLiquidityRunRisk, FIFTEEN_MINUTES);
+//const FIFTEEN_MINUTES = 15 * 60 * 1000;
+//setInterval(checkLiquidityRunRisk, FIFTEEN_MINUTES);
 console.log(`🎧 流动性挤兑监控已启动 (每 15 分钟巡检一次，按 Ctrl+C 退出)...`);
