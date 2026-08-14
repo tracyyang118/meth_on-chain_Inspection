@@ -1,0 +1,57 @@
+name: mETH On-Chain Inspection
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-inspections:
+    runs-on: ubuntu-latest
+
+    # 🚨 关键新增：告诉 GitHub 所有命令都在 meth-monitor 子目录下执行
+    defaults:
+      run:
+        working-directory: ./meth-monitor
+
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+
+      - name: ⚙️ 设置 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📦 安装依赖库
+        run: npm install
+
+      - name: 🚀 执行跨链对账巡检 (Bridge Peg)
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          L2_RPC_URL: ${{ secrets.L2_RPC_URL }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node bridge-peg-monitor.js
+
+      - name: 🚀 执行预言机存活巡检 (Oracle Liveness)
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node oracle-liveness.js
+
+      - name: 🚀 执行流动性挤兑巡检 (Liquidity Monitor)
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node liquidity-monitor.js
+
+      - name: 🚀 执行前端防投毒巡检 (Frontend Integrity)
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node frontend-monitor.js
+
+      - name: 🚀 执行兑换率防跌断言 (Exchange Rate Monitor)
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node rate-monitor.js
