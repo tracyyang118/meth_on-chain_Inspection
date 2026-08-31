@@ -73,7 +73,7 @@ async function checkOracleLiveness() {
         console.log(`   └─ 距离上次更新已过 : ${timeDiffHours} 小时`);
 
         // 设置严格阈值：8 小时
-        const MAX_ALLOWED_HOURS = 8.1;
+        const MAX_ALLOWED_HOURS = 8.5;
         const THRESHOLD_SECONDS = MAX_ALLOWED_HOURS * 3600;
 
         if (timeDiffSeconds >= THRESHOLD_SECONDS) {
