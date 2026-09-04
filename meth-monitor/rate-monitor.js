@@ -74,7 +74,6 @@ async function getExchangeRateAtBlock(blockNumber) {
     const F = BigInt(historicalOracleRecord.currentTotalValidatorBalance || historicalOracleRecord[6]);
     const E = BigInt(historicalOracleRecord.cumulativeProcessedDepositAmount || historicalOracleRecord[7]);
 
-    // 注意：这里的算法保留了你之前的盘点逻辑
     const H_TotalAssets = A + B + C + (D - E) + F + G;
     const calculatedEthToMeth = (BigInt(totalSupply) * ONE_ETHER) / H_TotalAssets;
 
@@ -145,19 +144,28 @@ async function checkExchangeRate() {
             let shouldAlert = false;
             let alertLevel = "";
 
+            // ==========================================
             // 断言 1: 历史到最新报告的汇率是否健康
-            if (latestData.calculatedEthToMeth > prevData.calculatedEthToMeth || latestData.contractEthToMeth > prevData.contractEthToMeth) {
-                alertLevel = "🚨 [P0 致命告警] 历史 Oracle 更新显示汇率异常下跌 (mETH 贬值)！";
+            // ==========================================
+            const prevMethValueInEth = 1 / parseFloat(prevContractStr);
+            const latestMethValueInEth = 1 / parseFloat(latestContractStr);
+            const historicalValueDrop = prevMethValueInEth - latestMethValueInEth;
+
+            if (historicalValueDrop > 0.0001) {
+                alertLevel = `🚨 [P0 致命告警] 历史 Oracle 更新显示汇率异常下跌 (mETH 发生贬值，跌幅超阈值: ${historicalValueDrop.toFixed(6)})！`;
                 reportMsg += `\n${alertLevel}`;
                 shouldAlert = true;
             } else {
-                reportMsg += `\n✅ 历史 Oracle 更新汇率单调递减 (升值)，符合预期。`;
+                if (historicalValueDrop > 0) {
+                    reportMsg += `\n✅ 历史 Oracle 更新汇率存在微幅贬值 (跌幅: ${historicalValueDrop.toFixed(6)})，在 0.0001 容忍阈值内，业务健康。`;
+                } else {
+                    reportMsg += `\n✅ 历史 Oracle 更新汇率保持平稳或升值，符合预期。`;
+                }
             }
 
-            // 断言 2: 计算 1 mETH 的 ETH 价值贬值幅度
-            // 数学逻辑: ethToMETH 是 1 ETH 换多少 mETH，所以 1 / ethToMETH 就是 1 mETH 等于多少 ETH。
-            // 如果 mETH 贬值，旧的价值会大于新的价值，两者的差值即为跌幅。
-            const latestMethValueInEth = 1 / parseFloat(latestContractStr);
+            // ==========================================
+            // 断言 2: 计算最新报告到当前的 1 mETH 的 ETH 价值贬值幅度
+            // ==========================================
             const currentMethValueInEth = 1 / parseFloat(currentContractStr);
             const valueDrop = latestMethValueInEth - currentMethValueInEth;
 
@@ -178,7 +186,7 @@ async function checkExchangeRate() {
             // 在控制台打印完整日志
             console.log(reportMsg);
 
-            // 触发飞书告警 (把上下文一并带上)
+            // 触发飞书告警
             if (shouldAlert) {
                 console.log("\n⚠️ 满足告警条件，正在推送消息...");
                 await triggerAlert(reportMsg);
