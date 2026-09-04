@@ -233,27 +233,7 @@ async function checkCrossChainPeg() {
             console.error(driftMsg);
             await triggerAlert(driftMsg);
         } else {
-            // 组装完整的排版字符串，用于推送飞书弹窗
-            const reportMsg = `📊 宏观资产核单:
-   ├─ [L1 Ethereum] 当前区块 : ${l1Block}
-   ├─ [L2 Mantle]   当前区块 : ${l2Block}
-   ├─ [L1 mETH 专用桥锁仓]   : ${ethers.formatEther(l1AdapterLocked)} mETH
-   ├─ [L1 Mantle 官方桥锁仓] : ${ethers.formatEther(l1MantleBridgeLocked)} mETH
-   ├─ [L1 总支撑储备资产]    : ${ethers.formatEther(totalL1Locked)} mETH
-   └─ [L2 实际网络总发行]    : ${ethers.formatEther(supply)} mETH
-   👉 跨链在途资金差值       : ${ethers.formatEther(actualInTransit)} mETH
-
-🔍 开始增量事件对账 (核对范围: L1[${state.lastL1Block}-${l1Block}], L2[${state.lastL2Block}-${l2Block}])
-   ├─ [上次结转在途] : ${ethers.formatEther(prevTheoretical)} mETH
-   ├─ [+] 期间新增排队 : ${ethers.formatEther(newPendingAmount)} mETH (${initiatedEvents.length} 笔)
-   ├─ [-] 期间完成提取 : ${ethers.formatEther(claimedAmount)} mETH (${finalizedEvents.length} 笔)
-   👉 [理论在途推算] : ${ethers.formatEther(currentTheoretical)} mETH
-
-✅ 账本对齐成功！资金流水清晰，未发生暗箱扣款。
-当前在途资金: ${ethers.formatEther(actualInTransit)} mETH`;
-
-            console.log(`   ✅ 账本对齐成功！资金流水清晰，未发生暗箱扣款。`);
-            await triggerAlert(reportMsg);
+            console.log(`   ✅ 账本对齐成功！资金流水清晰，未发生暗箱扣款（无异常，跳过告警）。`);
         }
 
         saveState({

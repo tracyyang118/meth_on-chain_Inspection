@@ -3,7 +3,7 @@ const { ethers } = require('ethers');
 const axios = require('axios');
 
 // ==========================================
-// 1. 基础配置与 RPC 节点初始化 (改为纯 HTTP，适配 CI 环境)
+// 1. 基础配置与 RPC 节点初始化
 // ==========================================
 const RPC_URL = process.env.RPC_URL;
 if (!RPC_URL) {
@@ -74,6 +74,7 @@ async function getExchangeRateAtBlock(blockNumber) {
     const F = BigInt(historicalOracleRecord.currentTotalValidatorBalance || historicalOracleRecord[6]);
     const E = BigInt(historicalOracleRecord.cumulativeProcessedDepositAmount || historicalOracleRecord[7]);
 
+    // 注意：这里的算法保留了你之前的盘点逻辑
     const H_TotalAssets = A + B + C + (D - E) + F + G;
     const calculatedEthToMeth = (BigInt(totalSupply) * ONE_ETHER) / H_TotalAssets;
 
@@ -85,11 +86,14 @@ async function getExchangeRateAtBlock(blockNumber) {
 
 async function triggerAlert(message) {
     const WEBHOOK_URL = process.env.FEISHU_WEBHOOK;
-    if(!WEBHOOK_URL) return;
+    if(!WEBHOOK_URL) {
+        console.log("⚠️ 未配置 FEISHU_WEBHOOK，跳过发送告警。");
+        return;
+    }
     await axios.post(WEBHOOK_URL, {
         msg_type: "text",
         content: { text: message }
-    }).catch(e => console.error("告警发送失败:", e.message));
+    }).catch(e => console.error("❌ 告警发送失败:", e.message));
 }
 
 // ==========================================
@@ -106,44 +110,78 @@ async function checkExchangeRate() {
             const latestBlock = Number(latestRecord.updateEndBlock || latestRecord[1]);
             const previousBlock = Number(previousRecord.updateEndBlock || previousRecord[1]);
 
-            console.log(`\n🔍 [快照核查] 正在核算历史及当前实时兑换率...`);
-
-            // 并发获取过去两次 Oracle 更新时的状态，以及当下的最新状态
-            const [prevData, latestData, currentContractEthToMeth] = await Promise.all([
+            // 并发获取过去两次 Oracle 更新时的状态，以及当下的最新状态和最新区块高
+            const [prevData, latestData, currentContractEthToMeth, currentBlock] = await Promise.all([
                 getExchangeRateAtBlock(previousBlock),
                 getExchangeRateAtBlock(latestBlock),
-                stakingContract.ethToMETH(1000000000000000000n)
+                stakingContract.ethToMETH(1000000000000000000n),
+                provider.getBlockNumber()
             ]);
 
-            console.log(`\n   --- 区块 [${previousBlock}] (历史) ---`);
-            console.log(`   ├─ 盘点计算 (1 ETH = ? mETH): ${ethers.formatUnits(prevData.calculatedEthToMeth, 18)}`);
-            console.log(`   └─ 合约报价 (1 ETH = ? mETH): ${ethers.formatUnits(prevData.contractEthToMeth, 18)}`);
+            // 格式化数值用于打印和计算
+            const prevCalcStr = ethers.formatUnits(prevData.calculatedEthToMeth, 18);
+            const prevContractStr = ethers.formatUnits(prevData.contractEthToMeth, 18);
 
-            console.log(`\n   --- 区块 [${latestBlock}] (最新 Oracle 报告) ---`);
-            console.log(`   ├─ 盘点计算 (1 ETH = ? mETH): ${ethers.formatUnits(latestData.calculatedEthToMeth, 18)}`);
-            console.log(`   └─ 合约报价 (1 ETH = ? mETH): ${ethers.formatUnits(latestData.contractEthToMeth, 18)}`);
+            const latestCalcStr = ethers.formatUnits(latestData.calculatedEthToMeth, 18);
+            const latestContractStr = ethers.formatUnits(latestData.contractEthToMeth, 18);
 
-            console.log(`\n   --- 主网当前最新实时报价 ---`);
-            console.log(`   └─ 合约报价 (1 ETH = ? mETH): ${ethers.formatUnits(currentContractEthToMeth, 18)}`);
+            const currentContractStr = ethers.formatUnits(currentContractEthToMeth, 18);
 
-            console.log(`\n   --- 状态防跌断言检查 ---`);
+            // 构造完整的报告文本
+            let reportMsg = `🔍 [快照核查] 正在核算历史及当前实时兑换率...\n`;
+            reportMsg += `\n--- 区块 [${previousBlock}] (历史) ---`;
+            reportMsg += `\n├─ 盘点计算 (1 ETH = ? mETH): ${prevCalcStr}`;
+            reportMsg += `\n└─ 合约报价 (1 ETH = ? mETH): ${prevContractStr}`;
+
+            reportMsg += `\n\n--- 区块 [${latestBlock}] (最新 Oracle 报告) ---`;
+            reportMsg += `\n├─ 盘点计算 (1 ETH = ? mETH): ${latestCalcStr}`;
+            reportMsg += `\n└─ 合约报价 (1 ETH = ? mETH): ${latestContractStr}`;
+
+            reportMsg += `\n\n--- 主网当前最新实时报价 [补充实时块高: ${currentBlock}] ---`;
+            reportMsg += `\n└─ 合约报价 (1 ETH = ? mETH): ${currentContractStr}`;
+
+            reportMsg += `\n\n--- 状态防跌断言检查 ---`;
+
+            let shouldAlert = false;
+            let alertLevel = "";
 
             // 断言 1: 历史到最新报告的汇率是否健康
             if (latestData.calculatedEthToMeth > prevData.calculatedEthToMeth || latestData.contractEthToMeth > prevData.contractEthToMeth) {
-                const errorMsg = `🚨 [P0 致命告警] 历史 Oracle 更新显示汇率异常下跌 (mETH 贬值)！`;
-                console.error(errorMsg);
-                await triggerAlert(errorMsg);
+                alertLevel = "🚨 [P0 致命告警] 历史 Oracle 更新显示汇率异常下跌 (mETH 贬值)！";
+                reportMsg += `\n${alertLevel}`;
+                shouldAlert = true;
             } else {
-                console.log(`   ✅ 历史 Oracle 更新汇率单调递减 (升值)，符合预期。`);
+                reportMsg += `\n✅ 历史 Oracle 更新汇率单调递减 (升值)，符合预期。`;
             }
 
-            // 断言 2: 从最近一次报告到当下的实时汇率是否健康
-            if (currentContractEthToMeth > latestData.contractEthToMeth) {
-                const dropMsg = `🚨 [P0 致命告警] 当前实时 ethToMETH 报价差于上一次 Oracle 报告！mETH 发生贬值！`;
-                console.error(dropMsg);
-                await triggerAlert(dropMsg);
+            // 断言 2: 计算 1 mETH 的 ETH 价值贬值幅度
+            // 数学逻辑: ethToMETH 是 1 ETH 换多少 mETH，所以 1 / ethToMETH 就是 1 mETH 等于多少 ETH。
+            // 如果 mETH 贬值，旧的价值会大于新的价值，两者的差值即为跌幅。
+            const latestMethValueInEth = 1 / parseFloat(latestContractStr);
+            const currentMethValueInEth = 1 / parseFloat(currentContractStr);
+            const valueDrop = latestMethValueInEth - currentMethValueInEth;
+
+            // 如果贬值幅度超过 0.001 ETH
+            if (valueDrop > 0.001) {
+                alertLevel = `🚨 [P0 致命告警] 当前实时合约 ethToMETH 报价差于上一次 Oracle 报告！mETH 发生贬值 (跌幅超阈值: ${valueDrop.toFixed(6)})！`;
+                reportMsg += `\n${alertLevel}`;
+                shouldAlert = true;
             } else {
-                console.log(`   ✅ 当前实时汇率相较于最新报告保持平稳或升值，业务健康。`);
+                // 如果微幅贬值但在阈值内，或者正常升值
+                if (valueDrop > 0) {
+                    reportMsg += `\n✅ 当前实时汇率相较于最新报告存在微幅贬值 (跌幅: ${valueDrop.toFixed(6)})，在 0.001 容忍阈值内，业务健康。`;
+                } else {
+                    reportMsg += `\n✅ 当前实时汇率相较于最新报告保持平稳或升值，业务健康。`;
+                }
+            }
+
+            // 在控制台打印完整日志
+            console.log(reportMsg);
+
+            // 触发飞书告警 (把上下文一并带上)
+            if (shouldAlert) {
+                console.log("\n⚠️ 满足告警条件，正在推送消息...");
+                await triggerAlert(reportMsg);
             }
 
         } else {
@@ -154,7 +192,7 @@ async function checkExchangeRate() {
         console.error("❌ 探针执行失败:", error);
     } finally {
         // CI 模式：执行完毕后立刻强制退出进程，不留后台
-        console.log("🏁 巡检结束，退出进程。");
+        console.log("\n🏁 巡检结束，退出进程。");
         process.exit(0);
     }
 }
