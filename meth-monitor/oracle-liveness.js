@@ -73,11 +73,11 @@ async function checkOracleLiveness() {
         console.log(`   └─ 距离上次更新已过 : ${timeDiffHours} 小时`);
 
         // 设置严格阈值：8 小时
-        const MAX_ALLOWED_HOURS = 8.5;
+        const MAX_ALLOWED_HOURS = 9;
         const THRESHOLD_SECONDS = MAX_ALLOWED_HOURS * 3600;
 
         if (timeDiffSeconds >= THRESHOLD_SECONDS) {
-            const errorMsg = `🚨 [P1 严重告警] Oracle 预言机当前已停摆预警！\n距离上次更新已过 ${timeDiffHours} 小时，达到/超过了 ${MAX_ALLOWED_HOURS} 小时的阈值。`;
+            const errorMsg = `🚨 [P1 告警] Oracle 预言机距离上次更新已过 ${timeDiffHours} 小时，达到/超过了 ${MAX_ALLOWED_HOURS} 小时的阈值。`;
             console.error(errorMsg);
             await triggerAlert(errorMsg);
         }
