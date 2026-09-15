@@ -10,7 +10,10 @@ if (!RPC_URL) {
     console.error("❌ 未找到 RPC_URL 环境变量，请检查 .env 文件。");
     process.exit(1);
 }
-const provider = new ethers.JsonRpcProvider(RPC_URL);
+
+// 【修改点 1】：添加静态网络配置。假设当前监控以太坊主网 (Chain ID: 1)。
+// 这可以防止 ethers 在初始化时自动发起 eth_chainId 请求，节约 RPC 调用频率。
+const provider = new ethers.JsonRpcProvider(RPC_URL, 1, { staticNetwork: true });
 
 // ==========================================
 // 2. 核心合约地址配置
@@ -25,13 +28,13 @@ const ADDRESSES = {
 // ==========================================
 const ABIS = {
     LiquidityBuffer: [
-        // 获取缓冲池可用余额[cite: 20]
+        // 获取缓冲池可用余额
         "function getAvailableBalance() external view returns (uint256)"
     ],
     UnstakeRequestsManager: [
-        // 获取已分配但未领取的 ETH 余额[cite: 18]
+        // 获取已分配但未领取的 ETH 余额
         "function balance() external view returns (uint256)",
-        // 获取当前解押队列的 ETH 缺口[cite: 18]
+        // 获取当前解押队列的 ETH 缺口
         "function allocatedETHDeficit() external view returns (uint256)"
     ]
 };
@@ -60,16 +63,11 @@ async function checkLiquidityRunRisk() {
     console.log(`\n[${new Date().toISOString()}] 🔍 正在执行解押流动性风险评估...`);
 
     try {
-        // 并发读取链上流动性状态
-        const [
-            bufferAvailableBal,
-            managerBalance,
-            managerDeficit
-        ] = await Promise.all([
-            liquidityBufferContract.getAvailableBalance(),    // LiquidityBuffer.balance[cite: 20]
-            unstakeMgrContract.balance(),                     // UnstakeRequestsManager.Balance[cite: 18]
-            unstakeMgrContract.allocatedETHDeficit()          // 还缺多少 ETH 才能满足所有解押[cite: 18]
-        ]);
+        // 【修改点 2】：废弃 Promise.all，改为串行读取链上状态
+        // 错开 RPC 请求时间，有效避免免费节点抛出 429 Rate Limit
+        const bufferAvailableBal = await liquidityBufferContract.getAvailableBalance();
+        const managerBalance = await unstakeMgrContract.balance();
+        const managerDeficit = await unstakeMgrContract.allocatedETHDeficit();
 
         const bufferBal = BigInt(bufferAvailableBal);
         const managerBal = BigInt(managerBalance);
@@ -128,6 +126,6 @@ checkLiquidityRunRisk();
 // ==========================================
 // 6. 设置执行频率：每 15 分钟循环执行一次
 // ==========================================
-//const FIFTEEN_MINUTES = 15 * 60 * 1000;
-//setInterval(checkLiquidityRunRisk, FIFTEEN_MINUTES);
+const FIFTEEN_MINUTES = 15 * 60 * 1000;
+setInterval(checkLiquidityRunRisk, FIFTEEN_MINUTES);
 console.log(`🎧 流动性挤兑监控已启动 (每 15 分钟巡检一次，按 Ctrl+C 退出)...`);
