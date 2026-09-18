@@ -18,9 +18,9 @@ const ORACLE_ADDRESS = '0x8735049F496727f824Cc0f2B174d826f5c408192';
 // 3. 提取所需的 ABI
 const ABIS = {
     Oracle: [
-        "function numRecords() external view returns (uint256)", // 获取记录总数[cite: 14]
-        "function recordAt(uint256 idx) external view returns (tuple(uint64 updateStartBlock, uint64 updateEndBlock, uint64 currentNumValidatorsNotWithdrawable, uint64 cumulativeNumValidatorsWithdrawable, uint128 windowWithdrawnPrincipalAmount, uint128 windowWithdrawnRewardAmount, uint128 currentTotalValidatorBalance, uint128 cumulativeProcessedDepositAmount))", // 获取指定记录[cite: 14]
-        "function latestRecord() external view returns (tuple(uint64 updateStartBlock, uint64 updateEndBlock, uint64 currentNumValidatorsNotWithdrawable, uint64 cumulativeNumValidatorsWithdrawable, uint128 windowWithdrawnPrincipalAmount, uint128 windowWithdrawnRewardAmount, uint128 currentTotalValidatorBalance, uint128 cumulativeProcessedDepositAmount))" // 获取最新记录[cite: 14]
+        "function numRecords() external view returns (uint256)",
+        "function recordAt(uint256 idx) external view returns (tuple(uint64 updateStartBlock, uint64 updateEndBlock, uint64 currentNumValidatorsNotWithdrawable, uint64 cumulativeNumValidatorsWithdrawable, uint128 windowWithdrawnPrincipalAmount, uint128 windowWithdrawnRewardAmount, uint128 currentTotalValidatorBalance, uint128 cumulativeProcessedDepositAmount))",
+        "function latestRecord() external view returns (tuple(uint64 updateStartBlock, uint64 updateEndBlock, uint64 currentNumValidatorsNotWithdrawable, uint64 cumulativeNumValidatorsWithdrawable, uint128 windowWithdrawnPrincipalAmount, uint128 windowWithdrawnRewardAmount, uint128 currentTotalValidatorBalance, uint128 cumulativeProcessedDepositAmount))"
     ]
 };
 
@@ -41,21 +41,23 @@ async function triggerAlert(message) {
 // ==========================================
 async function checkOracleLiveness() {
     console.log(`\n[${new Date().toISOString()}] 🔍 正在探测 Oracle 节点更新状态...`);
+    let exitCode = 0; // 默认退出码为成功 (0)
+
     try {
         // --- 第一部分：当前主网状态 vs 最新 Oracle 记录 ---
         const currentBlock = await provider.getBlock('latest');
         const currentTime = currentBlock.timestamp;
 
-        const numRecords = await oracleContract.numRecords(); // 获取总记录数[cite: 14]
+        const numRecords = await oracleContract.numRecords();
 
         if (numRecords === 0n) {
             console.log("⚠️ Oracle 中尚无有效记录！");
-            return;
+            process.exit(0); // 正常退出
         }
 
         // 获取最新记录 (N)
-        const latestRecord = await oracleContract.latestRecord(); // 获取最新记录[cite: 14]
-        const latestUpdateEndBlock = Number(latestRecord.updateEndBlock || latestRecord[1]); // 提取截止区块[cite: 14]
+        const latestRecord = await oracleContract.latestRecord();
+        const latestUpdateEndBlock = Number(latestRecord.updateEndBlock || latestRecord[1]);
 
         const latestRecordBlock = await provider.getBlock(latestUpdateEndBlock);
         if (!latestRecordBlock) throw new Error(`无法获取区块 ${latestUpdateEndBlock} 的信息。`);
@@ -80,13 +82,14 @@ async function checkOracleLiveness() {
             const errorMsg = `🚨 [P1 告警] Oracle 预言机距离上次更新已过 ${timeDiffHours} 小时，达到/超过了 ${MAX_ALLOWED_HOURS} 小时的阈值。`;
             console.error(errorMsg);
             await triggerAlert(errorMsg);
+            exitCode = 1; // 触发告警，打上失败标记！
         }
 
         // --- 第二部分：回溯最近两次报告的时间差 ---
         if (numRecords >= 2n) {
             // 获取上一条记录 (N-1)
-            const prevRecord = await oracleContract.recordAt(numRecords - 2n); // 获取上一条记录[cite: 14]
-            const prevUpdateEndBlock = Number(prevRecord.updateEndBlock || prevRecord[1]); // 提取截止区块[cite: 14]
+            const prevRecord = await oracleContract.recordAt(numRecords - 2n);
+            const prevUpdateEndBlock = Number(prevRecord.updateEndBlock || prevRecord[1]);
 
             const prevRecordBlock = await provider.getBlock(prevUpdateEndBlock);
             const prevReportTimestamp = prevRecordBlock.timestamp;
@@ -105,6 +108,7 @@ async function checkOracleLiveness() {
                 const intervalErrorMsg = `🚨 [P2 警告] Oracle 历史提交记录不达标！\n最近两次出块报告的时间差为 ${intervalHours} 小时，未满足小于 ${MAX_ALLOWED_HOURS} 小时的频率要求。`;
                 console.error(intervalErrorMsg);
                 await triggerAlert(intervalErrorMsg);
+                exitCode = 1; // 触发历史频率告警，打上失败标记！
             } else {
                 console.log(`   ✅ 两次报告时间差小于 ${MAX_ALLOWED_HOURS} 小时，提交频率合规。`);
             }
@@ -112,6 +116,10 @@ async function checkOracleLiveness() {
 
     } catch (error) {
         console.error("❌ 巡检脚本执行异常:", error);
+        exitCode = 1; // 代码抛错，打上失败标记！
+    } finally {
+        // 关键逻辑：无论前面是正常还是告警，都在最后统一带着状态码退出进程
+        process.exit(exitCode);
     }
 }
 

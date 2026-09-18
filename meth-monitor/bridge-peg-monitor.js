@@ -41,27 +41,18 @@ const l1BridgeContract = new ethers.Contract(ADDRESSES.MantleOfficialBridge, ABI
 async function triggerAlert(message) {
     const WEBHOOK_URL = process.env.FEISHU_WEBHOOK;
     if(!WEBHOOK_URL) return;
-
-    await axios.post(WEBHOOK_URL, {
-        msg_type: "text",
-        content: { text: message }
-    }).catch(e => console.error("告警发送失败:", e.message));
+    await axios.post(WEBHOOK_URL, { msg_type: "text", content: { text: message } }).catch(e => console.error("告警发送失败:", e.message));
 }
 
 function loadState() {
-    if (fs.existsSync(STATE_FILE)) {
-        return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    }
+    if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     return null;
 }
-
 function saveState(state) {
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 增加 logger 参数，以便将并发查询的日志也捕获进告警上下文中
 async function getBatchedLogsConcurrent(contract, filter, fromBlock, toBlock, maxConcurrency = 15, logger = console.log) {
     let allEvents = [];
     let chunkSize = 2000;
@@ -78,41 +69,27 @@ async function getBatchedLogsConcurrent(contract, filter, fromBlock, toBlock, ma
             break;
         } catch (error) {
             const errorStr = (error.message || error.toString()).toLowerCase();
-            if (errorStr.includes('10 block range')) {
-                chunkSize = 10;
-                logger(`   ⚠️ [探测结果] 节点严格限制 ${chunkSize} 块/次查询`);
-                break;
-            } else if (errorStr.includes('429') || errorStr.includes('rate limit')) {
-                await sleep(2000);
-            } else {
-                chunkSize = Math.floor(chunkSize / 2);
-                if (chunkSize < 1) throw new Error(`无法获取日志，区块分片降至 0。报错: ${errorStr}`);
-            }
+            if (errorStr.includes('10 block range')) { chunkSize = 10; break; }
+            else if (errorStr.includes('429') || errorStr.includes('rate limit')) await sleep(2000);
+            else { chunkSize = Math.floor(chunkSize / 2); if (chunkSize < 1) throw new Error(`无法获取日志，区块分片降至 0`); }
         }
     }
 
     if (currentBlock > toBlock) return allEvents;
 
-    logger(`   [并发阶段] 启动 ${maxConcurrency} 个并发线程加速同步...`);
     let tasks = [];
     for (let i = currentBlock; i <= toBlock; i += chunkSize) {
         tasks.push({ start: i, end: Math.min(i + chunkSize - 1, toBlock) });
     }
 
-    let completed = 0;
-    let activeWorkers = 0;
-    let taskIndex = 0;
-
+    let completed = 0, activeWorkers = 0, taskIndex = 0;
     return new Promise((resolve) => {
         const next = async () => {
             if (taskIndex >= tasks.length && activeWorkers === 0) return resolve(allEvents);
             while (activeWorkers < maxConcurrency && taskIndex < tasks.length) {
                 const task = tasks[taskIndex++];
                 activeWorkers++;
-                fetchChunk(task).finally(() => {
-                    activeWorkers--;
-                    next();
-                });
+                fetchChunk(task).finally(() => { activeWorkers--; next(); });
             }
         };
 
@@ -125,39 +102,29 @@ async function getBatchedLogsConcurrent(contract, filter, fromBlock, toBlock, ma
                     completed++;
                     if (completed % 100 === 0 || completed === tasks.length) {
                         const progress = ((completed / tasks.length) * 100).toFixed(2);
-                        logger(`   └─ ⚡ 并发进度: ${progress}% (已完成 ${completed}/${tasks.length} 个请求批次)`);
+                        logger(`   └─ ⚡ 并发进度: ${progress}%`);
                     }
                     return;
                 } catch (error) {
                     const errorStr = (error.message || "").toLowerCase();
                     if (errorStr.includes('429') || errorStr.includes('rate limit')) {
-                        const delay = (6 - retries) * 1000 + Math.random() * 500;
-                        await sleep(delay);
+                        await sleep((6 - retries) * 1000 + Math.random() * 500);
                         retries--;
-                    } else {
-                        await sleep(2000);
-                        retries--;
-                    }
+                    } else { await sleep(2000); retries--; }
                 }
             }
-            logger(`   ❌ 放弃拉取区块区间 ${task.start}-${task.end}，重试次数耗尽！`);
         };
-
         next();
     });
 }
 
 async function checkCrossChainPeg() {
     console.log(`\n[${new Date().toISOString()}] 🔍 正在执行 L1-L2 增量跨链对账...`);
-
-    // 用于收集告警时发送给飞书的完整上下文信息
     let alertContext = "";
-    const log = (msg) => {
-        console.log(msg);          // 打印到终端
-        alertContext += msg + "\n"; // 追加到告警消息体
-    };
+    const log = (msg) => { console.log(msg); alertContext += msg + "\n"; };
 
-    let hasAlert = false; // 标记本次巡检是否触发了告警
+    let exitCode = 0; // 默认成功
+    let hasAlert = false;
 
     try {
         const [l1AdapterBalance, l1MantleBridgeBalance, l2TotalSupply, l1Block, l2Block] = await Promise.all([
@@ -168,31 +135,25 @@ async function checkCrossChainPeg() {
             l2Provider.getBlockNumber()
         ]);
 
-        const l1AdapterLocked = BigInt(l1AdapterBalance);
-        const l1MantleBridgeLocked = BigInt(l1MantleBridgeBalance);
-        const totalL1Locked = l1AdapterLocked + l1MantleBridgeLocked;
+        const totalL1Locked = BigInt(l1AdapterBalance) + BigInt(l1MantleBridgeBalance);
         const supply = BigInt(l2TotalSupply);
-
         const actualInTransit = totalL1Locked - supply;
 
         log(`📊 宏观资产核单:`);
         log(`   ├─ [L1 Ethereum] 当前区块 : ${l1Block}`);
         log(`   ├─ [L2 Mantle]   当前区块 : ${l2Block}`);
-        log(`   ├─ [L1 mETH 专用桥锁仓]   : ${ethers.formatEther(l1AdapterLocked)} mETH`);
-        log(`   ├─ [L1 Mantle 官方桥锁仓] : ${ethers.formatEther(l1MantleBridgeLocked)} mETH`);
+        log(`   ├─ [L1 mETH 专用桥锁仓]   : ${ethers.formatEther(BigInt(l1AdapterBalance))} mETH`);
+        log(`   ├─ [L1 Mantle 官方桥锁仓] : ${ethers.formatEther(BigInt(l1MantleBridgeBalance))} mETH`);
         log(`   ├─ [L1 总支撑储备资产]    : ${ethers.formatEther(totalL1Locked)} mETH`);
         log(`   └─ [L2 实际网络总发行]    : ${ethers.formatEther(supply)} mETH`);
         log(`   👉 跨链在途资金差值       : ${ethers.formatEther(actualInTransit)} mETH`);
 
-        // P0: 致命错误
         if (actualInTransit < 0n) {
-            const deficit = supply - totalL1Locked;
-            log(`\n🚨 [P0 致命告警] 跨链桥脱锚！发现 L2 恶意增发！\n物理储备已被击穿，凭空超发: ${ethers.formatEther(deficit)} mETH`);
+            log(`\n🚨 [P0 致命告警] 跨链桥脱锚！发现 L2 恶意增发！\n物理储备已被击穿，凭空超发: ${ethers.formatEther(supply - totalL1Locked)} mETH`);
             await triggerAlert(alertContext);
-            return;
+            process.exit(1);
         }
 
-        // P1: 拥堵告警
         const MAX_PENDING_THRESHOLD = ethers.parseEther("1000.0");
         if (actualInTransit > MAX_PENDING_THRESHOLD) {
             log(`\n⚠️ [P1 拥堵告警] 跨链排队资金突破 1000 mETH 红线！\n当前在途积压: ${ethers.formatEther(actualInTransit)} mETH。`);
@@ -200,28 +161,19 @@ async function checkCrossChainPeg() {
         }
 
         const state = loadState();
-
         if (!state) {
             console.log(`\n初始化账本：初次运行，记录当前区块与基准在途资金...`);
             saveState({ lastL1Block: l1Block, lastL2Block: l2Block, theoreticalInTransit: actualInTransit.toString() });
-            console.log(`✅ 账本初始化完成，等待下一次巡检进行增量对账。`);
-            return;
+            process.exit(0);
         }
 
-        log(`\n🔍 开始增量事件对账 (核对范围: L1[${state.lastL1Block}-${l1Block}], L2[${state.lastL2Block}-${l2Block}])`);
-
-        log(`   ⏳ 正在拉取 L2 mETH 销毁事件 (全通道提现监控)...`);
         const burnFilter = l2MethContract.filters.Transfer(null, ethers.ZeroAddress);
-        // 将自定义的 log 方法传入并发模块，收集全过程信息
         const initiatedEvents = await getBatchedLogsConcurrent(l2MethContract, burnFilter, state.lastL2Block + 1, l2Block, 15, log);
-
         let newPendingAmount = 0n;
         initiatedEvents.forEach(e => newPendingAmount += e.args.value);
 
-        log(`   ⏳ 正在拉取 L1 Finalized 事件 (Ethereum)...`);
         const finalizedFilter = l1BridgeContract.filters.ERC20WithdrawalFinalized(ADDRESSES.L1mETH);
         const finalizedEvents = await getBatchedLogsConcurrent(l1BridgeContract, finalizedFilter, state.lastL1Block + 1, l1Block, 15, log);
-
         let claimedAmount = 0n;
         finalizedEvents.forEach(e => claimedAmount += e.args.amount);
 
@@ -233,35 +185,29 @@ async function checkCrossChainPeg() {
         log(`   ├─ [-] 期间完成提取 : ${ethers.formatEther(claimedAmount)} mETH (${finalizedEvents.length} 笔)`);
         log(`   👉 [理论在途推算] : ${ethers.formatEther(currentTheoretical)} mETH`);
 
-        const diff = actualInTransit > currentTheoretical
-                     ? actualInTransit - currentTheoretical
-                     : currentTheoretical - actualInTransit;
-
+        const diff = actualInTransit > currentTheoretical ? actualInTransit - currentTheoretical : currentTheoretical - actualInTransit;
         const TOLERANCE = ethers.parseEther("0.1");
 
-        // P1: 账本异常告警
         if (diff > TOLERANCE) {
             log(`🚨 [P1 账本异常] 发现不可解释的资金差额！\n差异: ${ethers.formatEther(diff)} mETH，请核实！`);
             hasAlert = true;
         } else {
-            // 如果账本无异常，使用原生 console.log 打印即可，不需要推入告警上下文（避免因为触发拥堵告警而附带此正常消息）
-            console.log(`   ✅ 账本对齐成功！资金流水清晰，未发生暗箱扣款（无异常，跳过告警）。`);
+            console.log(`   ✅ 账本对齐成功！资金流水清晰，未发生暗箱扣款。`);
         }
 
-        saveState({
-            lastL1Block: l1Block,
-            lastL2Block: l2Block,
-            theoreticalInTransit: actualInTransit.toString()
-        });
+        saveState({ lastL1Block: l1Block, lastL2Block: l2Block, theoreticalInTransit: actualInTransit.toString() });
 
-        // 只要期间被标记产生告警（脱锚、拥堵、对账失败其中一项），将包含全部过程信息的上下文推送到飞书
         if (hasAlert) {
             await triggerAlert(alertContext.trim());
+            exitCode = 1; // 有任何 P1 以上异常，标记为失败
         }
 
     } catch (error) {
         console.error("❌ 巡检脚本执行异常:", error);
         await triggerAlert(`L1-L2 跨链对账探针异常，请检查网络节点！错误信息: ${error.message}`);
+        exitCode = 1;
+    } finally {
+        process.exit(exitCode);
     }
 }
 
