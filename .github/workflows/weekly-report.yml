@@ -1,0 +1,41 @@
+name: update weekly report
+
+on:
+  # 1. 保留手动触发：非常建议保留此选项，这样您可以随时在 GitHub 页面上点击按钮来测试脚本，而不需要死等周日
+  workflow_dispatch:
+
+  # 2. 定时任务触发
+  schedule:
+    # 这里的 cron 表达式使用的是 UTC 时间。
+    # 0 0 * * 0 代表 UTC 时间每周日凌晨 00:00，刚好对应北京时间每周日早上 08:00
+    - cron: '0 0 * * 0'
+
+jobs:
+  generate-and-send-report:
+    runs-on: ubuntu-latest # 指定运行的系统环境
+
+    steps:
+      # 第 1 步：检出您的代码仓库（必写，这样 Action 才能读取您仓库里的脚本）
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 第 2 步：配置您的运行环境（这里以 Python 为例，如果您用 Node.js 或 Shell，请自行修改）
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 第 3 步：安装依赖（如有需要，请取消注释并修改为实际的依赖安装命令）
+      # - name: Install dependencies
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     pip install -r requirements.txt
+
+      # 第 4 步：执行您具体的生成和发送周报脚本
+      - name: Run weekly report script
+        # 请把下面这行 echo 替换为您实际执行发送周报的命令
+        # 例如：python send_report.py
+        run: |
+          echo "开始生成并发送周报..."
+          echo "当前时间: $(date)"
+          # 执行您的脚本: node index.js 或者 python main.py
