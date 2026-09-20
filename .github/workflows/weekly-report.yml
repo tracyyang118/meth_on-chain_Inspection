@@ -1,41 +1,39 @@
-name: update weekly report
+name: mETH Protocol Weekly Report
 
 on:
-  # 1. 保留手动触发：非常建议保留此选项，这样您可以随时在 GitHub 页面上点击按钮来测试脚本，而不需要死等周日
+  # 1. 允许在 GitHub Actions 页面手动触发执行（即“手动运行第一次发报告”）
   workflow_dispatch:
 
   # 2. 定时任务触发
   schedule:
     # 这里的 cron 表达式使用的是 UTC 时间。
-    # 0 0 * * 0 代表 UTC 时间每周日凌晨 00:00，刚好对应北京时间每周日早上 08:00
-    - cron: '0 0 * * 0'
+    # 北京时间 = UTC + 8。北京时间早上 08:00 对应 UTC 时间的 00:00。
+    # "1,4" 代表星期一和星期四
+    - cron: '0 0 * * 1,4'
 
 jobs:
   generate-and-send-report:
     runs-on: ubuntu-latest # 指定运行的系统环境
 
     steps:
-      # 第 1 步：检出您的代码仓库（必写，这样 Action 才能读取您仓库里的脚本）
+      # 第 1 步：检出代码仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 第 2 步：配置您的运行环境（这里以 Python 为例，如果您用 Node.js 或 Shell，请自行修改）
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # 第 2 步：配置 Node.js 运行环境 (因为您的报告脚本是 js)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.10'
+          node-version: '20'
 
-      # 第 3 步：安装依赖（如有需要，请取消注释并修改为实际的依赖安装命令）
-      # - name: Install dependencies
-      #   run: |
-      #     python -m pip install --upgrade pip
-      #     pip install -r requirements.txt
+      # 第 3 步：安装 package.json 中定义的依赖 (如 axios, dotenv)
+      - name: Install dependencies
+        run: npm install
 
-      # 第 4 步：执行您具体的生成和发送周报脚本
-      - name: Run weekly report script
-        # 请把下面这行 echo 替换为您实际执行发送周报的命令
-        # 例如：python send_report.py
-        run: |
-          echo "开始生成并发送周报..."
-          echo "当前时间: $(date)"
-          # 执行您的脚本: node index.js 或者 python main.py
+      # 第 4 步：执行生成和发送周报的统帅脚本
+      - name: Run master script and send report
+        run: node weekly-report.js
+        env:
+          # 必须将 GitHub 仓库配置的 Secrets 注入到环境变量中供代码读取
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          RPC_URL: ${{ secrets.RPC_URL }}

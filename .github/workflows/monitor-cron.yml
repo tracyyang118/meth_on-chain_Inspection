@@ -8,8 +8,6 @@ on:
 jobs:
   run-inspections:
     runs-on: ubuntu-latest
-
-    # 🚨 关键新增：告诉 GitHub 所有命令都在 meth-monitor 子目录下执行
     defaults:
       run:
         working-directory: ./meth-monitor
@@ -26,7 +24,9 @@ jobs:
       - name: 📦 安装依赖库
         run: npm install
 
+      # 注意：下面每一个 node 执行步骤都加了 if: always()
       - name: 🚀 执行跨链对账巡检 (Bridge Peg)
+        if: always()
         env:
           RPC_URL: ${{ secrets.RPC_URL }}
           L2_RPC_URL: ${{ secrets.L2_RPC_URL }}
@@ -34,23 +34,27 @@ jobs:
         run: node bridge-peg-monitor.js
 
       - name: 🚀 执行预言机存活巡检 (Oracle Liveness)
+        if: always()
         env:
           RPC_URL: ${{ secrets.RPC_URL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: node oracle-liveness.js
 
       - name: 🚀 执行流动性挤兑巡检 (Liquidity Monitor)
+        if: always()
         env:
           RPC_URL: ${{ secrets.RPC_URL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: node liquidity-monitor.js
 
       - name: 🚀 执行前端防投毒巡检 (Frontend Integrity)
+        if: always()
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: node frontend-monitor.js
 
       - name: 🚀 执行兑换率防跌断言 (Exchange Rate Monitor)
+        if: always()
         env:
           RPC_URL: ${{ secrets.RPC_URL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
