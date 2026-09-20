@@ -64,64 +64,81 @@ async function triggerAlert(message) {
     await axios.post(WEBHOOK_URL, { msg_type: "text", content: { text: message } }).catch(e => console.error("❌ 告警发送失败:", e.message));
 }
 
+// 移除了内部的 try-catch 和 process.exit，让外部能够捕获到错误进行重试
 async function checkExchangeRate() {
-    console.log(`\n[${new Date().toISOString()}] 🚀 启动兑换率快照巡检 (CI 定时版)...`);
-    let exitCode = 0; // 默认成功
-    try {
-        const recordsCount = await oracleContract.numRecords();
-        if (recordsCount >= 2n) {
-            const latestRecord = await oracleContract.recordAt(recordsCount - 1n);
-            const previousRecord = await oracleContract.recordAt(recordsCount - 2n);
-            const latestBlock = Number(latestRecord.updateEndBlock || latestRecord[1]);
-            const previousBlock = Number(previousRecord.updateEndBlock || previousRecord[1]);
+    const recordsCount = await oracleContract.numRecords();
+    if (recordsCount >= 2n) {
+        const latestRecord = await oracleContract.recordAt(recordsCount - 1n);
+        const previousRecord = await oracleContract.recordAt(recordsCount - 2n);
+        const latestBlock = Number(latestRecord.updateEndBlock || latestRecord[1]);
+        const previousBlock = Number(previousRecord.updateEndBlock || previousRecord[1]);
 
-            const [prevData, latestData, currentContractEthToMeth, currentBlock] = await Promise.all([
-                getExchangeRateAtBlock(previousBlock), getExchangeRateAtBlock(latestBlock),
-                stakingContract.ethToMETH(1000000000000000000n), provider.getBlockNumber()
-            ]);
+        const [prevData, latestData, currentContractEthToMeth, currentBlock] = await Promise.all([
+            getExchangeRateAtBlock(previousBlock), getExchangeRateAtBlock(latestBlock),
+            stakingContract.ethToMETH(1000000000000000000n), provider.getBlockNumber()
+        ]);
 
-            const prevContractStr = ethers.formatUnits(prevData.contractEthToMeth, 18);
-            const latestContractStr = ethers.formatUnits(latestData.contractEthToMeth, 18);
-            const currentContractStr = ethers.formatUnits(currentContractEthToMeth, 18);
+        const prevContractStr = ethers.formatUnits(prevData.contractEthToMeth, 18);
+        const latestContractStr = ethers.formatUnits(latestData.contractEthToMeth, 18);
+        const currentContractStr = ethers.formatUnits(currentContractEthToMeth, 18);
 
-            let reportMsg = `🔍 [快照核查] 正在核算历史及当前实时兑换率...\n`;
-            reportMsg += `\n--- 区块 [${previousBlock}] (历史) ---\n├─ 盘点计算 (1 ETH = ? mETH): ${ethers.formatUnits(prevData.calculatedEthToMeth, 18)}\n└─ 合约报价 (1 ETH = ? mETH): ${prevContractStr}`;
-            reportMsg += `\n\n--- 区块 [${latestBlock}] (最新 Oracle 报告) ---\n├─ 盘点计算 (1 ETH = ? mETH): ${ethers.formatUnits(latestData.calculatedEthToMeth, 18)}\n└─ 合约报价 (1 ETH = ? mETH): ${latestContractStr}`;
-            reportMsg += `\n\n--- 主网当前最新实时报价 [补充实时块高: ${currentBlock}] ---\n└─ 合约报价 (1 ETH = ? mETH): ${currentContractStr}\n\n--- 状态防跌断言检查 ---`;
+        let reportMsg = `🔍 [快照核查] 正在核算历史及当前实时兑换率...\n`;
+        reportMsg += `\n--- 区块 [${previousBlock}] (历史) ---\n├─ 盘点计算 (1 ETH = ? mETH): ${ethers.formatUnits(prevData.calculatedEthToMeth, 18)}\n└─ 合约报价 (1 ETH = ? mETH): ${prevContractStr}`;
+        reportMsg += `\n\n--- 区块 [${latestBlock}] (最新 Oracle 报告) ---\n├─ 盘点计算 (1 ETH = ? mETH): ${ethers.formatUnits(latestData.calculatedEthToMeth, 18)}\n└─ 合约报价 (1 ETH = ? mETH): ${latestContractStr}`;
+        reportMsg += `\n\n--- 主网当前最新实时报价 [补充实时块高: ${currentBlock}] ---\n└─ 合约报价 (1 ETH = ? mETH): ${currentContractStr}\n\n--- 状态防跌断言检查 ---`;
 
-            let shouldAlert = false;
-            const historicalValueDrop = (1 / parseFloat(prevContractStr)) - (1 / parseFloat(latestContractStr));
+        let shouldAlert = false;
+        const historicalValueDrop = (1 / parseFloat(prevContractStr)) - (1 / parseFloat(latestContractStr));
 
-            if (historicalValueDrop > 0.0001) {
-                reportMsg += `\n🚨 [P0 致命告警] 历史 Oracle 更新显示汇率异常下跌 (mETH 发生贬值，跌幅超阈值: ${historicalValueDrop.toFixed(6)})！`;
-                shouldAlert = true;
-            } else {
-                reportMsg += historicalValueDrop > 0 ? `\n✅ 历史 Oracle 更新汇率微幅贬值 (跌幅: ${historicalValueDrop.toFixed(6)})，在 0.0001 容忍阈值内，业务健康。` : `\n✅ 历史 Oracle 更新汇率保持平稳或升值，符合预期。`;
-            }
-
-            const valueDrop = (1 / parseFloat(latestContractStr)) - (1 / parseFloat(currentContractStr));
-            if (valueDrop > 0.001) {
-                reportMsg += `\n🚨 [P0 致命告警] 当前实时合约 ethToMETH 报价差于上一次 Oracle 报告！mETH 发生贬值 (跌幅超阈值: ${valueDrop.toFixed(6)})！`;
-                shouldAlert = true;
-            } else {
-                reportMsg += valueDrop > 0 ? `\n✅ 当前实时汇率相较于最新报告存在微幅贬值 (跌幅: ${valueDrop.toFixed(6)})，在 0.001 容忍阈值内，业务健康。` : `\n✅ 当前实时汇率相较于最新报告保持平稳或升值，业务健康。`;
-            }
-
-            console.log(reportMsg);
-
-            if (shouldAlert) {
-                console.log("\n⚠️ 满足告警条件，正在推送消息...");
-                await triggerAlert(reportMsg);
-                exitCode = 1; // 触发防跌告警，标记失败
-            }
+        if (historicalValueDrop > 0.0001) {
+            reportMsg += `\n🚨 [P0 致命告警] 历史 Oracle 更新显示汇率异常下跌 (mETH 发生贬值，跌幅超阈值: ${historicalValueDrop.toFixed(6)})！`;
+            shouldAlert = true;
+        } else {
+            reportMsg += historicalValueDrop > 0 ? `\n✅ 历史 Oracle 更新汇率微幅贬值 (跌幅: ${historicalValueDrop.toFixed(6)})，在 0.0001 容忍阈值内，业务健康。` : `\n✅ 历史 Oracle 更新汇率保持平稳或升值，符合预期。`;
         }
-    } catch (error) {
-        console.error("❌ 探针执行失败:", error);
-        exitCode = 1; // 异常报错，标记失败
-    } finally {
-        console.log("\n🏁 巡检结束，退出进程。");
-        process.exit(exitCode);
+
+        const valueDrop = (1 / parseFloat(latestContractStr)) - (1 / parseFloat(currentContractStr));
+        if (valueDrop > 0.001) {
+            reportMsg += `\n🚨 [P0 致命告警] 当前实时合约 ethToMETH 报价差于上一次 Oracle 报告！mETH 发生贬值 (跌幅超阈值: ${valueDrop.toFixed(6)})！`;
+            shouldAlert = true;
+        } else {
+            reportMsg += valueDrop > 0 ? `\n✅ 当前实时汇率相较于最新报告存在微幅贬值 (跌幅: ${valueDrop.toFixed(6)})，在 0.001 容忍阈值内，业务健康。` : `\n✅ 当前实时汇率相较于最新报告保持平稳或升值，业务健康。`;
+        }
+
+        console.log(reportMsg);
+
+        if (shouldAlert) {
+            console.log("\n⚠️ 满足告警条件，正在推送消息...");
+            await triggerAlert(reportMsg);
+            throw new Error("Business logic assertion failed: rate dropped below threshold");
+        }
     }
 }
 
-checkExchangeRate();
+// 🛠️ 加入坚固的全局重试机制
+async function main() {
+    console.log(`\n[${new Date().toISOString()}] 🚀 启动兑换率快照巡检 (CI 定时版)...`);
+    const MAX_RETRIES = 5;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            await checkExchangeRate();
+            console.log("\n🏁 巡检成功结束，退出进程。");
+            process.exit(0);
+        } catch (error) {
+            console.error(`\n❌ [第 ${attempt}/${MAX_RETRIES} 次执行失败]:`, error.shortMessage || error.message);
+
+            if (attempt === MAX_RETRIES) {
+                console.error("\n🏁 达到最大重试次数，可能是严重故障，彻底放弃。");
+                process.exit(1);
+            }
+
+            // 指数退避：每次失败多等一会 (5s, 10s, 15s...)，给 RPC 节点喘息时间
+            const waitTime = attempt * 5000;
+            console.log(`⏳ 遇到 RPC 网络抖动或限流，等待 ${waitTime / 1000} 秒后进行重试...\n`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+    }
+}
+
+main();

@@ -16,34 +16,23 @@ const MODULES = [
 ];
 
 // ============================================================================
-// 核心功能 1：获取近一周的 Actions 运行统计数据 & 失败链接 (格式完美升级版)
+// 核心功能 1：获取近一周的 Actions 运行统计数据 & 失败链接 (精准诊断树版)
 // ============================================================================
 async function getGithubStatsAndFailedUrls() {
     const token = process.env.GITHUB_TOKEN;
-    if (!token) {
-        return {
-            statsText: "⚠️ *未提供 GITHUB_TOKEN，无法统计历史数据。*",
-            failedUrlsText: ""
-        };
-    }
+    if (!token) return { statsText: "⚠️ *未配置 GITHUB_TOKEN*", failedUrlsText: "" };
 
     try {
         const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
         const apiUrl = `https://api.github.com/repos/${REPO_NAME}/actions/runs?created=>${oneWeekAgo}&per_page=100`;
         const response = await fetch(apiUrl, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Accept': 'application/vnd.github.v3+json'
-            }
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' }
         });
 
         if (!response.ok) throw new Error(`HTTP 错误: ${response.status}`);
         const data = await response.json();
 
-        let passCount = 0;
-        let failCount = 0;
-        let cancelCount = 0;
-        let failedRuns = [];
+        let passCount = 0, failCount = 0, cancelCount = 0, failedRuns = [];
 
         (data.workflow_runs || []).forEach(run => {
             if (run.conclusion === 'success') passCount++;
@@ -56,50 +45,115 @@ async function getGithubStatsAndFailedUrls() {
 
         const totalRuns = passCount + failCount + cancelCount;
         const healthScore = totalRuns > 0 ? ((passCount / totalRuns) * 100).toFixed(1) + "%" : "0%";
-
         const startDateStr = new Date(oneWeekAgo).toLocaleDateString('zh-CN');
-        const statsText = `**📊 本周全局执行概览 (自 ${startDateStr} 起)**\n监控引擎 7*24 小时守护 mETH 协议安全。\n\n🟢 **Pass (成功)**: ${passCount} 次\n🔴 <font color='red'>Fail (失败/异常)</font>: ${failCount} 次\n⚪️ **Cancel (被取消)**: ${cancelCount} 次\n🚨 **本周总体健康度**: ${healthScore} (共计运行 ${totalRuns} 次)`;
+        const statsText = `**📊 本周全局执行概览 (自 ${startDateStr} 起)**\n监控引擎 7*24 小时守护 mETH 协议安全。\n\n🟢 **Pass (成功)**: ${passCount} 次\n🔴 <font color='red'>Fail (异常)</font>: ${failCount} 次\n⚪️ **Cancel (被取消)**: ${cancelCount} 次\n🚨 **本周总体健康度**: ${healthScore} (共计运行 ${totalRuns} 次)`;
 
         let failedUrlsText = "";
         if (failedRuns.length > 0) {
-            // 👇 完美还原图二的标题 👇
             failedUrlsText = "**🚨 本周失败/异常任务清单列表：**\n";
 
-            failedRuns.forEach(run => {
-                // 1. 格式化时间为 MM-DD HH:mm (转为北京时间)
+            for (const run of failedRuns) {
                 const dateObj = new Date(run.created_at);
-                dateObj.setHours(dateObj.getHours() + 8); // UTC+8
-                const mm = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
-                const dd = String(dateObj.getUTCDate()).padStart(2, '0');
-                const hh = String(dateObj.getUTCHours()).padStart(2, '0');
-                const min = String(dateObj.getUTCMinutes()).padStart(2, '0');
-                const shortTimeStr = `${mm}-${dd} ${hh}:${min}`;
+                dateObj.setHours(dateObj.getHours() + 8);
+                const shortTimeStr = `${String(dateObj.getUTCMonth() + 1).padStart(2, '0')}-${String(dateObj.getUTCDate()).padStart(2, '0')} ${String(dateObj.getUTCHours()).padStart(2, '0')}:${String(dateObj.getUTCMinutes()).padStart(2, '0')}`;
 
-                // 2. 根据状态或名称推断简单的错误描述
-                let errorDesc = "巡检任务异常";
+                let errorDesc = "未知异常";
+
+                // 1. 判断是否是整体超时
                 if (run.conclusion === 'timed_out') {
-                    errorDesc = "超时或网络抖动";
-                } else if (run.name.toLowerCase().includes('oracle')) {
-                    errorDesc = "预言机读取超时";
-                } else if (run.name.toLowerCase().includes('bridge')) {
-                    errorDesc = "跨链对账任务异常";
-                } else {
-                    errorDesc = "RPC 节点或执行异常"; // 通用兜底描述
+                    errorDesc = "整体工作流执行超时";
+                }
+                // 2. 判断是否是 YAML 语法错误 (Run #1 的救星)
+                else if (run.name && (run.name.includes('.yml') || run.name.includes('.yaml'))) {
+                    errorDesc = "工作流YAML配置异常";
+                }
+                // 3. 深入 Job 级别提取真实报错
+                else {
+                    try {
+                        const jobsRes = await fetch(run.jobs_url, {
+                            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+                        });
+                        const jobsData = await jobsRes.json();
+                        const failedJob = (jobsData.jobs || []).find(j => j.conclusion === 'failure');
+
+                        if (failedJob) {
+                            let moduleName = "未知";
+                            const failedStep = failedJob.steps.find(s => s.conclusion === 'failure');
+
+                            if (failedStep && /install|npm|setup/i.test(failedStep.name)) {
+                                errorDesc = "环境依赖安装异常";
+                            } else {
+                                if (failedStep) {
+                                    const zhMatch = failedStep.name.match(/[\u4e00-\u9fa5]+/g);
+                                    if (zhMatch) moduleName = zhMatch.join('').replace(/执行|断言|防跌/g, '');
+                                    else moduleName = failedStep.name.split(' ')[0].substring(0, 8);
+                                }
+
+                                const logRes = await fetch(`https://api.github.com/repos/${REPO_NAME}/actions/jobs/${failedJob.id}/logs`, {
+                                    headers: { 'Authorization': `Bearer ${token}` }
+                                });
+
+                                if (logRes.ok) {
+                                    const rawLog = await logRes.text();
+                                    const lines = rawLog.split('\n');
+                                    let specificError = "执行崩溃";
+
+                                    for (let i = lines.length - 1; i >= 0; i--) {
+                                        const cleanLine = lines[i].replace(/^[0-9TZ:.-]+\s*/, '').trim();
+                                        if (!cleanLine) continue;
+
+                                        if (/npm ERR!|npm error/i.test(cleanLine)) {
+                                            specificError = "NPM依赖缺失"; break;
+                                        }
+
+                                        if (/(Error|Exception|Failed):/i.test(cleanLine)) {
+                                            // 💡 修复重点：优先拦截 RPC 专有错误！
+                                            if (/missing revert data|CALL_EXCEPTION|\-32000/i.test(cleanLine)) {
+                                                specificError = "RPC节点网络异常";
+                                            } else if (/ETIMEDOUT|timeout/i.test(cleanLine)) {
+                                                specificError = "网络请求超时";
+                                            } else if (/ECONNRESET|refused|socket/i.test(cleanLine)) {
+                                                specificError = "节点拒绝连接";
+                                            }
+                                            // 只有确认没有 missing revert data 时，才是真实的链上 revert
+                                            else if (/revert/i.test(cleanLine) && !/missing revert/i.test(cleanLine)) {
+                                                specificError = "链上抛出Revert";
+                                            } else {
+                                                const match = cleanLine.match(/(?:Error|Exception|Failed):\s*(.*)/i);
+                                                if (match && match[1]) specificError = match[1].substring(0, 15).trim() + "...";
+                                            }
+                                            break;
+                                        }
+
+                                        // 兜底捕捉
+                                        if (cleanLine.includes('CALL_EXCEPTION') || cleanLine.includes('missing revert data')) {
+                                            specificError = "RPC节点网络异常"; break;
+                                        }
+                                        if (cleanLine.includes('ETIMEDOUT')) { specificError = "TCP连接超时"; break; }
+                                    }
+
+                                    // 根据 specificError 组装最终结果
+                                    if (specificError === "RPC节点网络异常" || specificError === "节点拒绝连接") {
+                                        // 强制重写为我们想要的 RPC 异常格式，对应你截图中的需求
+                                        errorDesc = `RPC 节点连通性异常`;
+                                    } else {
+                                        errorDesc = `${moduleName} (${specificError})`;
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        errorDesc = "日志拉取或解析失败";
+                    }
                 }
 
-                // 3. 👇 完美还原图二的列表样式 👇
                 failedUrlsText += `• [Run #${run.run_number} (${errorDesc})](${run.html_url}) - ${shortTimeStr}\n`;
-            });
+            }
         }
 
         return { statsText, failedUrlsText };
-
     } catch (error) {
-        console.error("❌ 获取 GitHub 数据异常:", error);
-        return {
-            statsText: `⚠️ *获取历史统计数据异常: ${error.message}*`,
-            failedUrlsText: ""
-        };
+        return { statsText: `⚠️ *获取历史数据异常: ${error.message}*`, failedUrlsText: "" };
     }
 }
 
