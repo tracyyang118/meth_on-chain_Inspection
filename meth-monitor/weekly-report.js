@@ -13,6 +13,8 @@ const MODULES = [
     { name: '跨链桥对账', title: '🌉 跨链桥对账 (Bridge Peg)', file: 'bridge-peg-monitor.js' },
     { name: '汇率防跌断言', title: '📈 汇率防跌断言 (Rate Monitor)', file: 'rate-monitor.js' },
     { name: '前端防投毒', title: '🛡️ 前端防投毒 (Frontend Integrity)', file: 'frontend-monitor.js' }
+    { name: '储备金对账', title: '🏦 储备金对账 (Backing Check)', file: 'backing-check.js' },
+    { name: '全站深度巡检', title: '🌐 全站深度巡检 (Site Liveness)', file: 'site-liveness-monitor.js' }
 ];
 
 // ============================================================================

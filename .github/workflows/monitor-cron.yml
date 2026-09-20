@@ -59,3 +59,17 @@ jobs:
           RPC_URL: ${{ secrets.RPC_URL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: node rate-monitor.js
+
+      # 👇👇👇 以下为本次新增的两个核心任务 👇👇👇
+      - name: 🚀 执行储备金对账巡检 (Backing Check)
+        if: always()
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node backing-check.js
+
+      - name: 🚀 执行全站深度巡检 (Site Liveness)
+        if: always()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: node site-liveness-monitor.js
