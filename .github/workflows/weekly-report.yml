@@ -1,32 +1,34 @@
 name: mETH Protocol Weekly Report
 
 on:
-  # 1. 允许在 GitHub Actions 页面手动触发执行（即“手动运行第一次发报告”）
+  # 1. 允许在 GitHub Actions 页面手动触发执行
   workflow_dispatch:
 
   # 2. 定时任务触发
   schedule:
-    # 这里的 cron 表达式使用的是 UTC 时间。
-    # 北京时间 = UTC + 8。北京时间早上 08:00 对应 UTC 时间的 00:00。
-    # "1,4" 代表星期一和星期四
     - cron: '0 0 * * 1,4'
 
 jobs:
   generate-and-send-report:
     runs-on: ubuntu-latest # 指定运行的系统环境
 
+    # 👇👇👇 必须加上这三行，告诉系统去 meth-monitor 文件夹里执行命令 👇👇👇
+    defaults:
+      run:
+        working-directory: ./meth-monitor
+
     steps:
       # 第 1 步：检出代码仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 第 2 步：配置 Node.js 运行环境 (因为您的报告脚本是 js)
+      # 第 2 步：配置 Node.js 运行环境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # 第 3 步：安装 package.json 中定义的依赖 (如 axios, dotenv)
+      # 第 3 步：安装 package.json 中定义的依赖
       - name: Install dependencies
         run: npm install
 
@@ -34,6 +36,5 @@ jobs:
       - name: Run master script and send report
         run: node weekly-report.js
         env:
-          # 必须将 GitHub 仓库配置的 Secrets 注入到环境变量中供代码读取
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           RPC_URL: ${{ secrets.RPC_URL }}
