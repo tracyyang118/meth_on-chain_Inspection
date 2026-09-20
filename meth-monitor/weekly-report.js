@@ -5,7 +5,7 @@ const { execSync } = require('child_process');
 // 环境与常量配置
 // ============================================================================
 const FEISHU_WEBHOOK = process.env.FEISHU_WEBHOOK;
-const REPO_NAME = process.env.GITHUB_REPOSITORY || 'meth_online_check';
+const REPO_NAME = process.env.GITHUB_REPOSITORY || 'tracyyang118/meth_on-chain_Inspection';
 
 const MODULES = [
     { name: '预言机存活', title: '🔮 预言机存活 (Oracle Liveness)', file: 'oracle-liveness.js' },
@@ -16,7 +16,7 @@ const MODULES = [
 ];
 
 // ============================================================================
-// 核心功能 1：获取近一周的 Actions 运行统计数据 & 失败链接
+// 核心功能 1：获取近一周的 Actions 运行统计数据 & 失败链接 (格式完美升级版)
 // ============================================================================
 async function getGithubStatsAndFailedUrls() {
     const token = process.env.GITHUB_TOKEN;
@@ -28,10 +28,7 @@ async function getGithubStatsAndFailedUrls() {
     }
 
     try {
-        // 计算一周前的时间 (ISO 格式)
         const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-        // 调用 GitHub API 获取过去一周的 runs
         const apiUrl = `https://api.github.com/repos/${REPO_NAME}/actions/runs?created=>${oneWeekAgo}&per_page=100`;
         const response = await fetch(apiUrl, {
             headers: {
@@ -48,12 +45,10 @@ async function getGithubStatsAndFailedUrls() {
         let cancelCount = 0;
         let failedRuns = [];
 
-        // 统计状态并收集失败任务
         (data.workflow_runs || []).forEach(run => {
             if (run.conclusion === 'success') passCount++;
             else if (run.conclusion === 'failure' || run.conclusion === 'timed_out') {
                 failCount++;
-                // 只收集最近 5 个失败的链接防止刷屏
                 if (failedRuns.length < 5) failedRuns.push(run);
             }
             else if (run.conclusion === 'cancelled') cancelCount++;
@@ -62,17 +57,38 @@ async function getGithubStatsAndFailedUrls() {
         const totalRuns = passCount + failCount + cancelCount;
         const healthScore = totalRuns > 0 ? ((passCount / totalRuns) * 100).toFixed(1) + "%" : "0%";
 
-        // 组装【本周全局执行概览】文字
         const startDateStr = new Date(oneWeekAgo).toLocaleDateString('zh-CN');
-        const statsText = `**📊 本周全局执行概览 (自 ${startDateStr} 起)**\n监控引擎 7*24 小时守护 mETH 协议安全。\n\n🟢 **Pass (成功)**: ${passCount} 次\n🔴 <font color='red'>Fail (失败/超时)</font>: ${failCount} 次\n⚪️ **Cancel (被取消)**: ${cancelCount} 次\n🚨 **本周总体健康度**: ${healthScore} (共计运行 ${totalRuns} 次)`;
+        const statsText = `**📊 本周全局执行概览 (自 ${startDateStr} 起)**\n监控引擎 7*24 小时守护 mETH 协议安全。\n\n🟢 **Pass (成功)**: ${passCount} 次\n🔴 <font color='red'>Fail (失败/异常)</font>: ${failCount} 次\n⚪️ **Cancel (被取消)**: ${cancelCount} 次\n🚨 **本周总体健康度**: ${healthScore} (共计运行 ${totalRuns} 次)`;
 
-        // 组装【近期失败链接】文字
         let failedUrlsText = "";
         if (failedRuns.length > 0) {
-            failedUrlsText = "**🚨 近期 GitHub Actions 失败记录直达：**\n";
+            // 👇 完美还原图二的标题 👇
+            failedUrlsText = "**🚨 本周失败/异常任务清单列表：**\n";
+
             failedRuns.forEach(run => {
-                const timeStr = new Date(run.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-                failedUrlsText += `• [${timeStr}] [${run.name}](${run.html_url})\n`;
+                // 1. 格式化时间为 MM-DD HH:mm (转为北京时间)
+                const dateObj = new Date(run.created_at);
+                dateObj.setHours(dateObj.getHours() + 8); // UTC+8
+                const mm = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+                const dd = String(dateObj.getUTCDate()).padStart(2, '0');
+                const hh = String(dateObj.getUTCHours()).padStart(2, '0');
+                const min = String(dateObj.getUTCMinutes()).padStart(2, '0');
+                const shortTimeStr = `${mm}-${dd} ${hh}:${min}`;
+
+                // 2. 根据状态或名称推断简单的错误描述
+                let errorDesc = "巡检任务异常";
+                if (run.conclusion === 'timed_out') {
+                    errorDesc = "超时或网络抖动";
+                } else if (run.name.toLowerCase().includes('oracle')) {
+                    errorDesc = "预言机读取超时";
+                } else if (run.name.toLowerCase().includes('bridge')) {
+                    errorDesc = "跨链对账任务异常";
+                } else {
+                    errorDesc = "RPC 节点或执行异常"; // 通用兜底描述
+                }
+
+                // 3. 👇 完美还原图二的列表样式 👇
+                failedUrlsText += `• [Run #${run.run_number} (${errorDesc})](${run.html_url}) - ${shortTimeStr}\n`;
             });
         }
 
