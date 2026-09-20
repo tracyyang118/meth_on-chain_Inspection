@@ -38,3 +38,5 @@ jobs:
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           RPC_URL: ${{ secrets.RPC_URL }}
+          L2_RPC_URL: ${{ secrets.L2_RPC_URL }}
+          FRONTEND_CONFIG_URL: ${{ secrets.FRONTEND_CONFIG_URL }}
