@@ -12,7 +12,7 @@ const MODULES = [
     { name: '流动性防挤兑', title: '💧 流动性防挤兑 (Liquidity Monitor)', file: 'liquidity-monitor.js' },
     { name: '跨链桥对账', title: '🌉 跨链桥对账 (Bridge Peg)', file: 'bridge-peg-monitor.js' },
     { name: '汇率防跌断言', title: '📈 汇率防跌断言 (Rate Monitor)', file: 'rate-monitor.js' },
-    { name: '前端防投毒', title: '🛡️ 前端防投毒 (Frontend Integrity)', file: 'frontend-monitor.js' }
+    { name: '前端防投毒', title: '🛡️ 前端防投毒 (Frontend Integrity)', file: 'frontend-monitor.js' },
     { name: '储备金对账', title: '🏦 储备金对账 (Backing Check)', file: 'backing-check.js' },
     { name: '全站深度巡检', title: '🌐 全站深度巡检 (Site Liveness)', file: 'site-liveness-monitor.js' }
 ];
@@ -200,13 +200,42 @@ async function main() {
             content: `**${mod.title}**`
         });
 
-        let safeLog = result.log;
-        if (safeLog.length > 2000) safeLog = safeLog.substring(0, 2000) + "\n\n... [日志过长，已截断] ...";
+        // 🌟 【黑科技：智能分块突破飞书字数限制】
+        const safeLog = result.log;
+        const CHUNK_SIZE = 3000; // 设定飞书单块安全限制
 
-        logElements.push({
-            tag: "markdown",
-            content: `\`\`\`text\n${safeLog}\n\`\`\``
-        });
+        if (safeLog.length <= CHUNK_SIZE) {
+            // 如果长度安全，直接塞入
+            logElements.push({
+                tag: "markdown",
+                content: `\`\`\`text\n${safeLog}\n\`\`\``
+            });
+        } else {
+            // 如果超长，按行分割，防止把 URL 或单词从中间粗暴切断
+            const lines = safeLog.split('\n');
+            let currentChunk = "";
+
+            for (const line of lines) {
+                // 如果当前积累的字符数 + 这一行 超过了 3000
+                if (currentChunk.length + line.length > CHUNK_SIZE) {
+                    // 把装满的这部分先推入数组
+                    logElements.push({
+                        tag: "markdown",
+                        content: `\`\`\`text\n${currentChunk}\n\`\`\``
+                    });
+                    // 清空桶，准备装下一批
+                    currentChunk = "";
+                }
+                currentChunk += line + "\n";
+            }
+            // 把最后剩下的尾巴也推入数组
+            if (currentChunk.trim().length > 0) {
+                logElements.push({
+                    tag: "markdown",
+                    content: `\`\`\`text\n${currentChunk}\n\`\`\``
+                });
+            }
+        }
     }
 
     // 💡 第三步：组装最终飞书卡片
