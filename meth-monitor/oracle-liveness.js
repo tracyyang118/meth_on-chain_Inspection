@@ -37,91 +37,115 @@ async function triggerAlert(message) {
 }
 
 // ==========================================
-// 4. 核心逻辑：存活度与历史报告时间差断言
+// 4. 核心逻辑 (不包含 try-catch，让网络错误向上抛出)
 // ==========================================
-async function checkOracleLiveness() {
+async function performOracleCheck() {
     console.log(`\n[${new Date().toISOString()}] 🔍 正在探测 Oracle 节点更新状态...`);
-    let exitCode = 0; // 默认退出码为成功 (0)
+    let isBusinessHealthy = true; // 记录业务是否健康
 
-    try {
-        // --- 第一部分：当前主网状态 vs 最新 Oracle 记录 ---
-        const currentBlock = await provider.getBlock('latest');
-        const currentTime = currentBlock.timestamp;
+    // --- 第一部分：当前主网状态 vs 最新 Oracle 记录 ---
+    const currentBlock = await provider.getBlock('latest');
+    const currentTime = currentBlock.timestamp;
 
-        const numRecords = await oracleContract.numRecords();
+    const numRecords = await oracleContract.numRecords();
 
-        if (numRecords === 0n) {
-            console.log("⚠️ Oracle 中尚无有效记录！");
-            process.exit(0); // 正常退出
+    if (numRecords === 0n) {
+        console.log("⚠️ Oracle 中尚无有效记录！");
+        return true;
+    }
+
+    // 获取最新记录 (N)
+    const latestRecord = await oracleContract.latestRecord();
+    const latestUpdateEndBlock = Number(latestRecord.updateEndBlock || latestRecord[1]);
+
+    const latestRecordBlock = await provider.getBlock(latestUpdateEndBlock);
+    if (!latestRecordBlock) throw new Error(`无法获取区块 ${latestUpdateEndBlock} 的信息。`);
+
+    const latestReportTimestamp = latestRecordBlock.timestamp;
+
+    // 计算当前离上次更新的时差
+    const timeDiffSeconds = currentTime - latestReportTimestamp;
+    const timeDiffHours = (timeDiffSeconds / 3600).toFixed(2);
+
+    console.log(`📊 Oracle 状态核推单:`);
+    console.log(`   ├─ 当前主网最新区块 : ${currentBlock.number} (Time: ${new Date(currentTime * 1000).toLocaleString()})`);
+    console.log(`   ├─ Oracle 截止区块  : ${latestUpdateEndBlock} (Time: ${new Date(latestReportTimestamp * 1000).toLocaleString()})`);
+    console.log(`   └─ 距离上次更新已过 : ${timeDiffHours} 小时`);
+
+    const MAX_ALLOWED_HOURS = 9;
+    const THRESHOLD_SECONDS = MAX_ALLOWED_HOURS * 3600;
+
+    if (timeDiffSeconds >= THRESHOLD_SECONDS) {
+        const errorMsg = `🚨 [P1 告警] Oracle 预言机距离上次更新已过 ${timeDiffHours} 小时，达到/超过了 ${MAX_ALLOWED_HOURS} 小时的阈值。`;
+        console.error(errorMsg);
+        await triggerAlert(errorMsg);
+        isBusinessHealthy = false; // 业务异常
+    }
+
+    // --- 第二部分：回溯最近两次报告的时间差 ---
+    if (numRecords >= 2n) {
+        const prevRecord = await oracleContract.recordAt(numRecords - 2n);
+        const prevUpdateEndBlock = Number(prevRecord.updateEndBlock || prevRecord[1]);
+
+        const prevRecordBlock = await provider.getBlock(prevUpdateEndBlock);
+        const prevReportTimestamp = prevRecordBlock.timestamp;
+
+        const intervalSeconds = latestReportTimestamp - prevReportTimestamp;
+        const intervalHours = (intervalSeconds / 3600).toFixed(2);
+
+        console.log(`\n🔍 [历史回溯] 最近两次 Oracle 报告的提交时间差:`);
+        console.log(`   ├─ 报告 [N-1] 截止区块 : ${prevUpdateEndBlock} (Time: ${new Date(prevReportTimestamp * 1000).toLocaleString()})`);
+        console.log(`   ├─ 报告 [N]   截止区块 : ${latestUpdateEndBlock} (Time: ${new Date(latestReportTimestamp * 1000).toLocaleString()})`);
+        console.log(`   └─ 两次报告的时间差    : ${intervalHours} 小时`);
+
+        if (intervalSeconds >= THRESHOLD_SECONDS) {
+            const intervalErrorMsg = `🚨 [P2 警告] Oracle 历史提交记录不达标！\n最近两次出块报告的时间差为 ${intervalHours} 小时，未满足小于 ${MAX_ALLOWED_HOURS} 小时的频率要求。`;
+            console.error(intervalErrorMsg);
+            await triggerAlert(intervalErrorMsg);
+            isBusinessHealthy = false; // 业务异常
+        } else {
+            console.log(`   ✅ 两次报告时间差小于 ${MAX_ALLOWED_HOURS} 小时，提交频率合规。`);
         }
+    }
 
-        // 获取最新记录 (N)
-        const latestRecord = await oracleContract.latestRecord();
-        const latestUpdateEndBlock = Number(latestRecord.updateEndBlock || latestRecord[1]);
+    return isBusinessHealthy;
+}
 
-        const latestRecordBlock = await provider.getBlock(latestUpdateEndBlock);
-        if (!latestRecordBlock) throw new Error(`无法获取区块 ${latestUpdateEndBlock} 的信息。`);
+// ==========================================
+// 5. 坚如磐石的全局重试引擎 (遇到限流无限重试直到成功)
+// ==========================================
+async function main() {
+    let attempt = 1;
+    // 设定一个极高的上限，防止 GitHub Actions 因无限死循环而超时扣费 (Actions 最长运行 6 小时)
+    const MAX_RETRIES = 30;
 
-        const latestReportTimestamp = latestRecordBlock.timestamp;
+    while (true) {
+        try {
+            // 只要这里不抛出网络 Error，就代表代码正常执行完毕
+            const isHealthy = await performOracleCheck();
 
-        // 计算当前离上次更新的时差
-        const timeDiffSeconds = currentTime - latestReportTimestamp;
-        const timeDiffHours = (timeDiffSeconds / 3600).toFixed(2);
+            console.log("\n🏁 巡检顺利结束，退出进程。");
+            // 根据业务是否健康返回退出码。0 为成功，1 为触发了告警。
+            process.exit(isHealthy ? 0 : 1);
 
-        // 保留要求的输出格式
-        console.log(`📊 Oracle 状态核推单:`);
-        console.log(`   ├─ 当前主网最新区块 : ${currentBlock.number} (Time: ${new Date(currentTime * 1000).toLocaleString()})`);
-        console.log(`   ├─ Oracle 截止区块  : ${latestUpdateEndBlock} (Time: ${new Date(latestReportTimestamp * 1000).toLocaleString()})`);
-        console.log(`   └─ 距离上次更新已过 : ${timeDiffHours} 小时`);
+        } catch (error) {
+            const errMsg = error.shortMessage || error.message;
+            console.error(`\n❌ [第 ${attempt} 次执行遭遇 RPC 崩溃/限流]:`, errMsg);
 
-        // 设置严格阈值：8 小时
-        const MAX_ALLOWED_HOURS = 9;
-        const THRESHOLD_SECONDS = MAX_ALLOWED_HOURS * 3600;
-
-        if (timeDiffSeconds >= THRESHOLD_SECONDS) {
-            const errorMsg = `🚨 [P1 告警] Oracle 预言机距离上次更新已过 ${timeDiffHours} 小时，达到/超过了 ${MAX_ALLOWED_HOURS} 小时的阈值。`;
-            console.error(errorMsg);
-            await triggerAlert(errorMsg);
-            exitCode = 1; // 触发告警，打上失败标记！
-        }
-
-        // --- 第二部分：回溯最近两次报告的时间差 ---
-        if (numRecords >= 2n) {
-            // 获取上一条记录 (N-1)
-            const prevRecord = await oracleContract.recordAt(numRecords - 2n);
-            const prevUpdateEndBlock = Number(prevRecord.updateEndBlock || prevRecord[1]);
-
-            const prevRecordBlock = await provider.getBlock(prevUpdateEndBlock);
-            const prevReportTimestamp = prevRecordBlock.timestamp;
-
-            // 计算 N 和 N-1 两次报告之间的时差
-            const intervalSeconds = latestReportTimestamp - prevReportTimestamp;
-            const intervalHours = (intervalSeconds / 3600).toFixed(2);
-
-            console.log(`\n🔍 [历史回溯] 最近两次 Oracle 报告的提交时间差:`);
-            console.log(`   ├─ 报告 [N-1] 截止区块 : ${prevUpdateEndBlock} (Time: ${new Date(prevReportTimestamp * 1000).toLocaleString()})`);
-            console.log(`   ├─ 报告 [N]   截止区块 : ${latestUpdateEndBlock} (Time: ${new Date(latestReportTimestamp * 1000).toLocaleString()})`);
-            console.log(`   └─ 两次报告的时间差    : ${intervalHours} 小时`);
-
-            // 断言条件：时间差要小于 8 小时
-            if (intervalSeconds >= THRESHOLD_SECONDS) {
-                const intervalErrorMsg = `🚨 [P2 警告] Oracle 历史提交记录不达标！\n最近两次出块报告的时间差为 ${intervalHours} 小时，未满足小于 ${MAX_ALLOWED_HOURS} 小时的频率要求。`;
-                console.error(intervalErrorMsg);
-                await triggerAlert(intervalErrorMsg);
-                exitCode = 1; // 触发历史频率告警，打上失败标记！
-            } else {
-                console.log(`   ✅ 两次报告时间差小于 ${MAX_ALLOWED_HOURS} 小时，提交频率合规。`);
+            if (attempt >= MAX_RETRIES) {
+                console.error(`\n🏁 连续重试了 ${MAX_RETRIES} 次仍然被限流，为保护 CI 资源，强制退出。`);
+                process.exit(1);
             }
-        }
 
-    } catch (error) {
-        console.error("❌ 巡检脚本执行异常:", error);
-        exitCode = 1; // 代码抛错，打上失败标记！
-    } finally {
-        // 关键逻辑：无论前面是正常还是告警，都在最后统一带着状态码退出进程
-        process.exit(exitCode);
+            // 智能指数退避：第 1 次等 5 秒，第 2 次等 10 秒，最多等待 30 秒 (给 Alchemy 喘息恢复的时间)
+            const waitTime = Math.min(attempt * 5000, 30000);
+            console.log(`⏳ 遇到并发限流 (HTTP 429)，等待 ${waitTime / 1000} 秒后进行自动重试...\n`);
+
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            attempt++;
+        }
     }
 }
 
-// 立即执行一次
-checkOracleLiveness();
+// 启动大管家
+main();
