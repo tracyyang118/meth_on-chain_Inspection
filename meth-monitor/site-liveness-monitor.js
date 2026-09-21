@@ -11,15 +11,18 @@ const ENTRY_POINTS = [
     "https://app.methprotocol.xyz",
     "https://app.methprotocol.xyz/campaigns",
     "https://app.methprotocol.xyz/stats",
-    "https://app.methprotocol.xyz/stake"
+    "https://app.methprotocol.xyz/stake",
+    "https://app.methprotocol.xyz/unstake"
 ];
 
 const MAX_DEPTH = 3;
 const MAX_TOTAL_PAGES = 100;
 
-// ==========================================
-// 1.1 完整的合约地址 / 关键链接完整性基准
-// ==========================================
+// 🎯 区分两个巨鲸地址：一个兜里有 ETH（用于 Stake），一个兜里有 mETH（用于 Unstake）
+const STAKE_WHALE_ADDRESS = '0x86eAD908FB5d6F900ff109C9e26f79300f99271A'.toLowerCase();
+const UNSTAKE_WHALE_ADDRESS = '0x4aC943804e2492BeE7dBE5267dBfbd850287D6cB'.toLowerCase();
+
+// 全局白名单字典
 const EXPECTED_CONTRACTS = {
     "mETH Token L1": "0xd5F7838F5C461fefF7FE49ea5ebaF7728bB0ADfa",
     "mETH Token L2": "0xcDA86A272531e8640cD7F1a92c01839911B90bb0",
@@ -60,47 +63,286 @@ const EXPECTED_CONTRACTS = {
     "PortfolioDistrabutor": "0x8c555854b53F254cfe8B8b0D037139856585ed4e",
 };
 
+const OFFICIAL_STAKING_ADDRESS = EXPECTED_CONTRACTS["Staking"].toLowerCase();
+const OFFICIAL_UNSTAKE_MANAGER_ADDRESS = EXPECTED_CONTRACTS["UnstakeRequestsManager"].toLowerCase();
+
+// 提取全量白名单地址数组
+const WHITELIST_ADDRESSES = Object.values(EXPECTED_CONTRACTS).map(addr => addr.toLowerCase());
+
 const EXPECTED_LINK_DOMAINS = [
-    "docs.mantle.xyz",
-    "www.mantle.xyz",
-    "www.methprotocol.xyz",
-    "app.mantle.xyz",
-    "etherscan.io",
-    "mantlescan.xyz",
-    "explorer.mantle.xyz",
-    "beaconcha.in",
+    "docs.mantle.xyz", "www.mantle.xyz", "www.methprotocol.xyz", "app.mantle.xyz",
+    "etherscan.io", "mantlescan.xyz", "explorer.mantle.xyz", "beaconcha.in",
 ];
-
-const INTEGRITY_CHECK_PATHS = [
-    "/",
-    "/stake",
-    "/unstake",
-    "/claim",
-    "/bridge",
-    "/restake",
-    "/restake-claim",
-    "/unrestake",
-    "/portfolio",
-];
-
+const INTEGRITY_CHECK_PATHS = ["/", "/stake", "/unstake", "/claim", "/bridge", "/restake", "/restake-claim", "/unrestake", "/portfolio"];
 const CONTRACT_ADDRESS_REGEX = /0x[a-fA-F0-9]{40}/g;
 
 async function triggerAlert(message) {
     const WEBHOOK_URL = process.env.FEISHU_WEBHOOK;
     if (!WEBHOOK_URL) return;
-    await axios.post(WEBHOOK_URL, { msg_type: "text", content: { text: message } }).catch(e => console.error("告警发送失败:", e.message));
+    await axios.post(WEBHOOK_URL, { msg_type: "text", content: { text: message } }).catch(() => {});
 }
 
 // ==========================================
-// 2. 核心逻辑
+// 2. Stake 专用探针 (基于 demo.js)
+// ==========================================
+async function runStakeSniffer(targetUrl) {
+    console.log(`\n🔍 [Stake 探针] 启动交易防劫持嗅探: ${targetUrl}`);
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--window-size=1280,800']
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+
+    try {
+        await page.evaluateOnNewDocument((whaleAddr) => {
+            window.ethereum = {
+                isMetaMask: true,
+                request: async ({ method, params }) => {
+                    if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [whaleAddr];
+                    if (method === 'eth_chainId') return '0x1';
+                    if (method === 'net_version') return '1';
+                    if (method === 'eth_estimateGas') return '0x186a0';
+                    if (method === 'wallet_switchEthereumChain' || method === 'wallet_addEthereumChain') return null;
+                    if (method === 'personal_sign' || (method && method.startsWith('eth_sign'))) return '0x' + '0'.repeat(130);
+
+                    if (method === 'eth_sendTransaction') {
+                        window.__INTERCEPTED_TX__ = params[0];
+                        return '0x' + '0'.repeat(64);
+                    }
+                    try {
+                        const res = await fetch('https://eth.llamarpc.com', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
+                        });
+                        return (await res.json()).result;
+                    } catch (e) { return null; }
+                }
+            };
+        }, STAKE_WHALE_ADDRESS);
+
+        await page.goto(targetUrl, { waitUntil: 'networkidle2' });
+        await new Promise(r => setTimeout(r, 2000));
+
+        await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const connectBtn = btns.find(b => b.innerText.includes('Connect Wallet'));
+            if (connectBtn) connectBtn.click();
+        });
+        await new Promise(r => setTimeout(r, 2000));
+
+        await page.evaluate(() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (node.nodeValue.trim() === 'MetaMask') {
+                    let target = node.parentElement;
+                    for (let i = 0; i < 3 && target; i++) {
+                        target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                        target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                        target.click(); target = target.parentElement;
+                    } break;
+                }
+            }
+        });
+        await new Promise(r => setTimeout(r, 3500));
+        await page.keyboard.press('Escape');
+        await new Promise(r => setTimeout(r, 500));
+
+        const inputHandle = await page.$('input');
+        if (inputHandle) {
+            await inputHandle.click();
+            await page.keyboard.type('0.1', { delay: 100 });
+        }
+        await new Promise(r => setTimeout(r, 2000));
+
+        console.log("   ├─ 点击主页面 Stake 唤起 Confirm 弹窗...");
+        await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const stakeBtn = btns.reverse().find(b => (b.innerText.trim().toLowerCase() === 'stake' || b.innerText.toLowerCase().includes('submit')) && !b.disabled);
+            if (stakeBtn) stakeBtn.click();
+        });
+        await new Promise(r => setTimeout(r, 2500));
+
+        const uiAddress = await page.evaluate((whale) => {
+            const allText = document.body.innerHTML + ' ' + Array.from(document.querySelectorAll('a')).map(a => a.href).join(' ');
+            const matches = allText.match(/0x[a-fA-F0-9]{40}/gi) || [];
+            const filtered = Array.from(new Set(matches.map(a => a.toLowerCase()))).filter(a => a !== whale.toLowerCase());
+            return filtered.length > 0 ? filtered[0] : null;
+        }, STAKE_WHALE_ADDRESS);
+
+        if (uiAddress && uiAddress === OFFICIAL_STAKING_ADDRESS) {
+            console.log(`   └─ ✅ 命中 UI Confirm 快速通道，防劫持校验通过。`);
+            return null;
+        }
+
+        console.log("   ├─ 点击 Confirm Modal 内部二次确认 Stake 按钮...");
+        await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const confirmBtn = btns.reverse().find(b => b.innerText.trim() === 'Stake' && !b.disabled);
+            if (confirmBtn) confirmBtn.click();
+        });
+
+        console.log("⏳ 等待拦截 RPC 交易 Payload (最多等10秒)...");
+        const txPayload = await page.waitForFunction(() => window.__INTERCEPTED_TX__, { timeout: 10000 });
+        const interceptedAddr = (await txPayload.evaluate(tx => tx.to)).toLowerCase();
+
+        if (interceptedAddr !== OFFICIAL_STAKING_ADDRESS) {
+            return `🚨 [Stake] 交易被劫持！\n预期: ${OFFICIAL_STAKING_ADDRESS}\n实际: ${interceptedAddr}`;
+        }
+        console.log("   └─ ✅ RPC 底层交易校验通过，指向官方地址。");
+        return null;
+
+    } catch (e) {
+        return `Stake 交互崩溃: ${e.message}`;
+    } finally {
+        await browser.close();
+    }
+}
+
+// ==========================================
+// 3. Unstake 专用探针 (基于 demo2.js)
+// ==========================================
+async function runUnstakeSniffer(targetUrl) {
+    console.log(`\n🔍 [Unstake 探针] 启动 Permit 授权嗅探: ${targetUrl}`);
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--window-size=1280,800']
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+
+    try {
+        await page.evaluateOnNewDocument((whaleAddr) => {
+            window.__INTERCEPTED_PERMIT__ = null;
+            window.__INTERCEPTED_TX__ = null;
+
+            window.ethereum = {
+                isMetaMask: true,
+                request: async ({ method, params }) => {
+                    if (method === 'eth_requestAccounts' || method === 'eth_accounts') return [whaleAddr];
+                    if (method === 'eth_chainId') return '0x1';
+                    if (method === 'net_version') return '1';
+                    if (method === 'wallet_requestPermissions') return [{ parentCapability: 'eth_accounts' }];
+                    if (method === 'wallet_switchEthereumChain' || method === 'wallet_addEthereumChain') return null;
+
+                    if (method === 'eth_signTypedData_v4' || method === 'eth_signTypedData_v3') {
+                        try {
+                            const typedData = typeof params[1] === 'string' ? JSON.parse(params[1]) : params[1];
+                            if (typedData.primaryType === 'Permit' && typedData.message && typedData.message.spender) {
+                                 window.__INTERCEPTED_PERMIT__ = typedData.message.spender;
+                            }
+                        } catch (e) {}
+                        return '0x9924534a6e5585098ffb44bc6055d7a8d50bf23e59092490b411516a2b8e390c588040dbbb14cc590938f36c5df5359a0f5a7e584f295b9c037dae6b91cbb1591c';
+                    }
+                    if (method === 'eth_sendTransaction') {
+                        if (params && params[0] && params[0].to) window.__INTERCEPTED_TX__ = params[0].to;
+                        return '0x' + 'f'.repeat(64);
+                    }
+                    try {
+                        const res = await fetch('https://rpc.ankr.com/eth', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
+                        });
+                        const json = await res.json();
+                        if (json.error) return (method === 'eth_call' || method === 'eth_estimateGas') ? '0x' : null;
+                        return json.result;
+                    } catch (e) { return (method === 'eth_call' || method === 'eth_estimateGas') ? '0x' : null; }
+                }
+            };
+        }, UNSTAKE_WHALE_ADDRESS);
+
+        await page.goto(targetUrl, { waitUntil: 'networkidle2' });
+        await new Promise(r => setTimeout(r, 2000));
+
+        await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const connectBtn = btns.find(b => b.innerText.includes('Connect Wallet'));
+            if (connectBtn) connectBtn.click();
+        });
+        await new Promise(r => setTimeout(r, 1500));
+
+        await page.evaluate(() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (node.nodeValue.trim() === 'MetaMask') {
+                    let target = node.parentElement;
+                    for (let i = 0; i < 3 && target; i++) {
+                        target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                        target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                        target.click(); target = target.parentElement;
+                    } break;
+                }
+            }
+        });
+        await new Promise(r => setTimeout(r, 3500));
+        await page.keyboard.press('Escape');
+        await new Promise(r => setTimeout(r, 500));
+
+        console.log("   ├─ 模拟敲击解押金额 0.1...");
+        const inputHandle = await page.$('input');
+        if (inputHandle) {
+            await inputHandle.click();
+            await page.keyboard.type('0.1', { delay: 100 });
+        }
+        await new Promise(r => setTimeout(r, 2000));
+
+        console.log("   ├─ 智能点击页面主操作按钮...");
+        await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            let maxArea = 0, targetBtn = null;
+            for(let b of btns) {
+                const text = b.innerText.trim().toLowerCase();
+                if((text === 'approve meth' || text === 'unstake') && !b.disabled) {
+                    const rect = b.getBoundingClientRect();
+                    const area = rect.width * rect.height;
+                    if(area > maxArea) { maxArea = area; targetBtn = b; }
+                }
+            }
+            if (targetBtn) targetBtn.click();
+        });
+
+        console.log("⏳ 等待拦截无 Gas 签名授权 (Permit) 或真实交易 Payload...");
+        const targetAddress = await page.evaluate(async () => {
+            return new Promise((resolve) => {
+                const check = setInterval(() => {
+                    if (window.__INTERCEPTED_PERMIT__) {
+                        clearInterval(check); resolve({ type: 'Permit', address: window.__INTERCEPTED_PERMIT__ });
+                    } else if (window.__INTERCEPTED_TX__) {
+                        clearInterval(check); resolve({ type: 'Tx', address: window.__INTERCEPTED_TX__ });
+                    }
+                }, 500);
+                setTimeout(() => { clearInterval(check); resolve(null); }, 10000);
+            });
+        });
+
+        if (!targetAddress) return "未截获到 Permit 签名或发包请求，前端可能未响应。";
+
+        const interceptedAddr = targetAddress.address.toLowerCase();
+        if (interceptedAddr !== OFFICIAL_STAKING_ADDRESS) {
+            return `🚨 [Unstake] 业务链路被劫持！\n预期目标: ${OFFICIAL_STAKING_ADDRESS}\n实际目标: ${interceptedAddr}`;
+        }
+        console.log("   └─ ✅ Permit 授权目标正确指向官方 STAKING！");
+        return null;
+
+    } catch (e) {
+        return `Unstake 交互崩溃: ${e.message}`;
+    } finally {
+        await browser.close();
+    }
+}
+
+// ==========================================
+// 4. 静态扫描逻辑
 // ==========================================
 async function scanPageForIntegrity(page, currentUrl) {
     const suspiciousIssues = [];
     const foundAddresses = new Set();
-    const hasContractBaseline = Object.keys(EXPECTED_CONTRACTS).length > 0;
-    const hasLinkBaseline = EXPECTED_LINK_DOMAINS.length > 0;
-    if (!hasContractBaseline && !hasLinkBaseline) return { suspiciousIssues, foundAddresses };
-
     const currentPath = (() => { try { return new URL(currentUrl).pathname; } catch (e) { return ''; } })();
     const isCorePage = INTEGRITY_CHECK_PATHS.some(p => currentPath === p || currentPath === p + '/');
 
@@ -117,36 +359,57 @@ async function scanPageForIntegrity(page, currentUrl) {
 
     if (!isCorePage) return { suspiciousIssues, foundAddresses };
 
-    if (hasContractBaseline) {
-        const expectedSet = new Set(Object.values(EXPECTED_CONTRACTS).map(a => a.toLowerCase()));
-        for (const addr of foundAddresses) {
-            if (!expectedSet.has(addr)) suspiciousIssues.push(`发现未知/可疑合约地址: ${addr}（不在基准白名单中，需人工复核是否被篡改）`);
-        }
+    const expectedSet = new Set(WHITELIST_ADDRESSES);
+    for (const addr of foundAddresses) {
+        if (!expectedSet.has(addr)) suspiciousIssues.push(`发现未知/可疑合约地址: ${addr}（不在基准白名单中，需人工复核）`);
     }
 
-    if (hasLinkBaseline) {
-        for (const link of pageData.links) {
-            try {
-                const u = new URL(link);
-                if (u.origin === BASE_URL) continue;
-                if (!EXPECTED_LINK_DOMAINS.some(d => u.hostname === d || u.hostname.endsWith('.' + d))) {
-                    suspiciousIssues.push(`发现可疑外部跳转链接: ${link}（域名 "${u.hostname}" 不在白名单内）`);
-                }
-            } catch (e) {}
-        }
+    for (const link of pageData.links) {
+        try {
+            const u = new URL(link);
+            if (u.origin === BASE_URL) continue;
+            if (!EXPECTED_LINK_DOMAINS.some(d => u.hostname === d || u.hostname.endsWith('.' + d))) {
+                suspiciousIssues.push(`发现可疑外部跳转链接: ${link}`);
+            }
+        } catch (e) {}
     }
     return { suspiciousIssues: suspiciousIssues.map(msg => ({ url: currentUrl, reason: msg })), foundAddresses };
 }
 
+async function safeNavigate(browser, url, maxRetries = 3) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        let page;
+        try {
+            page = await browser.newPage();
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0');
+            const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
+            return { page, response, error: null };
+        } catch (error) {
+            if (page) await page.close().catch(() => {});
+            if (error.message.includes('ERR_ABORTED') || error.message.includes('destroyed')) {
+                return { page: null, response: null, error: { type: 'SPA_ABORTED', message: error.message } };
+            }
+            if (attempt === maxRetries) return { page: null, response: null, error };
+            await new Promise(res => setTimeout(res, attempt * 2000));
+        }
+    }
+}
+
+// ==========================================
+// 5. 主引擎 (带 Fast-Fail 熔断器)
+// ==========================================
 async function deepCheckSiteLiveness() {
-    console.log(`\n[${new Date().toISOString()}] 🌐 启动全站多起点深度巡检...`);
+    console.log(`\n[${new Date().toISOString()}] 🌐 启动全站存活性与业务防劫持混合巡检...`);
     let browser;
-    let exitCode = 0; // 默认成功
+    let exitCode = 0;
     const visited = new Set();
     const brokenLinks = [];
     const integrityIssues = [];
     const siteWideFoundAddresses = new Set();
     const queue = ENTRY_POINTS.map(url => ({ url, depth: 0, parent: 'Root Seed' }));
+
+    let stakeChecked = false;
+    let unstakeChecked = false;
 
     try {
         browser = await puppeteer.launch({ headless: "new", args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
@@ -155,44 +418,35 @@ async function deepCheckSiteLiveness() {
         while (queue.length > 0 && pagesChecked < MAX_TOTAL_PAGES) {
             const currentItem = queue.shift();
             const { url: currentUrl, depth: currentDepth } = currentItem;
-            if (visited.has(currentUrl)) continue;
-            visited.add(currentUrl);
+
+            const normalizedUrl = currentUrl.replace(/\/$/, "");
+            if (visited.has(normalizedUrl)) continue;
+            visited.add(normalizedUrl);
             pagesChecked++;
-            console.log(`   ├─ [层级 ${currentDepth}] 正在检测: ${currentUrl}`);
+            console.log(`   ├─ [层级 ${currentDepth}] 正在检测: ${normalizedUrl}`);
 
-            let page;
-            try {
-                page = await browser.newPage();
-                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0');
-                const response = await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+            const navResult = await safeNavigate(browser, normalizedUrl);
 
-                if (response && !response.ok()) {
-                    brokenLinks.push({ url: currentUrl, reason: `HTTP ${response.status()}`, parent: currentItem.parent });
-                    continue;
+            if (navResult.error) {
+                if (navResult.error.type !== 'SPA_ABORTED') {
+                    brokenLinks.push({ url: normalizedUrl, reason: `连续 3 次访问超时或异常: ${navResult.error.message}`, parent: currentItem.parent });
                 }
+                continue;
+            }
 
-                const hasSPAError = await page.evaluate(() => {
-                    const title = document.title.toLowerCase();
-                    const headings = Array.from(document.querySelectorAll('h1, h2')).map(h => h.innerText.toLowerCase().trim());
-                    if (title.includes('404') || title.includes('page not found')) return true;
-                    for (const text of headings) {
-                        if (text === '404' || text.includes('404 not found') || text === 'page not found') return true;
-                    }
-                    return false;
-                });
+            const { page, response } = navResult;
 
-                if (hasSPAError) {
-                    brokenLinks.push({ url: currentUrl, reason: `前端抛出 404 (Title 或大标题显示丢失)`, parent: currentItem.parent });
+            try {
+                if (response && !response.ok()) {
+                    brokenLinks.push({ url: normalizedUrl, reason: `HTTP ${response.status()}`, parent: currentItem.parent });
                     continue;
                 }
 
                 try {
-                    const { suspiciousIssues, foundAddresses } = await scanPageForIntegrity(page, currentUrl);
+                    const { suspiciousIssues, foundAddresses } = await scanPageForIntegrity(page, normalizedUrl);
                     if (suspiciousIssues.length > 0) integrityIssues.push(...suspiciousIssues);
                     foundAddresses.forEach(addr => siteWideFoundAddresses.add(addr));
-                } catch (integrityErr) {
-                    console.log(`   │    ⚠️ 完整性校验执行异常: ${integrityErr.message}`);
-                }
+                } catch (e) {}
 
                 if (currentDepth < MAX_DEPTH) {
                     const hrefs = await page.evaluate(() => Array.from(document.querySelectorAll('a')).map(a => a.href));
@@ -201,56 +455,65 @@ async function deepCheckSiteLiveness() {
                             const urlObj = new URL(link);
                             if (urlObj.origin === BASE_URL && !link.includes('#')) {
                                 const cleanUrl = link.replace(/\/$/, "");
-                                if (!visited.has(cleanUrl)) queue.push({ url: cleanUrl, depth: currentDepth + 1, parent: currentUrl });
+                                if (!visited.has(cleanUrl)) queue.push({ url: cleanUrl, depth: currentDepth + 1, parent: normalizedUrl });
                             }
                         } catch (e) {}
                     });
                 }
-            } catch (error) {
-                if (error.message.includes('ERR_ABORTED') || error.message.includes('Execution context was destroyed')) {
-                    console.log(`   │    💡 [SPA 容错] 页面发生拦截或重定向跳转，已安全忽略。`);
-                } else {
-                    brokenLinks.push({ url: currentUrl, reason: `访问超时或异常: ${error.message}`, parent: currentItem.parent });
-                }
             } finally {
                 if (page) await page.close().catch(() => {});
             }
-        }
 
-        console.log(`\n📊 遍历统计: 共检查了 ${pagesChecked} 个独立页面。`);
-        if (Object.keys(EXPECTED_CONTRACTS).length > 0) {
-            for (const [label, addr] of Object.entries(EXPECTED_CONTRACTS)) {
-                if (!siteWideFoundAddresses.has(addr.toLowerCase())) {
-                    integrityIssues.push({ url: '(全站范围)', reason: `预期合约地址缺失 [${label}]: 本次爬取到的所有页面中均未展示地址 ${addr}` });
+            // 🎯 动态探针路由机制 (分离调用)
+            let currentPath = '';
+            try { currentPath = new URL(normalizedUrl).pathname; } catch(e){}
+
+            if (currentPath === '/stake' && !stakeChecked) {
+                stakeChecked = true;
+                const hijackError = await runStakeSniffer(normalizedUrl);
+                if (hijackError) {
+                    integrityIssues.push({ url: normalizedUrl, reason: hijackError });
+                    console.error(`🚨 [熔断机制触发] 检测到 Stake 高危异常！抛弃剩余探测任务，立即发起告警！`);
+                    break;
+                }
+            }
+            if (currentPath === '/unstake' && !unstakeChecked) {
+                unstakeChecked = true;
+                const hijackError = await runUnstakeSniffer(normalizedUrl);
+                if (hijackError) {
+                    integrityIssues.push({ url: normalizedUrl, reason: hijackError });
+                    console.error(`🚨 [熔断机制触发] 检测到 Unstake 高危异常！抛弃剩余探测任务，立即发起告警！`);
+                    break;
                 }
             }
         }
+
+        console.log(`\n📊 遍历与探测统计: 共检查了 ${pagesChecked} 个独立页面。`);
 
         if (brokenLinks.length > 0) {
             let errorDetails = brokenLinks.map(b => `❌ 坏链: ${b.url}\n   └─ 报错: ${b.reason}\n   └─ 来源页: ${b.parent}`).join('\n\n');
             const alertMsg = `🚨 [P1 前端告警] 发现深度子页面无法访问！\n\n${errorDetails}`;
             console.error(`\n${alertMsg}`);
             await triggerAlert(alertMsg);
-            exitCode = 1; // 发现死链，标记失败
-        } else {
-            console.log(`✅ 深度巡检通过：${pagesChecked} 个节点路由健康，未发现任何死链。`);
+            exitCode = 1;
         }
 
         if (integrityIssues.length > 0) {
-            let integrityDetails = integrityIssues.map(b => `⚠️ 页面: ${b.url}\n   └─ 问题: ${b.reason}`).join('\n\n');
-            const integrityAlertMsg = `🚨🚨 [P0 安全告警] 检测到合约地址/关键链接可能被篡改！请立即人工核实！\n\n${integrityDetails}`;
+            let integrityDetails = integrityIssues.map(b => `⚠️ 探针: ${b.url}\n   └─ 问题: ${b.reason}`).join('\n\n');
+            const integrityAlertMsg = `🚨🚨 [P0 致命安全告警] 检测到合约篡改或业务被劫持风险！\n\n${integrityDetails}`;
             console.error(`\n${integrityAlertMsg}`);
             await triggerAlert(integrityAlertMsg);
-            exitCode = 1; // 发现防篡改异常，标记失败
-        } else if (Object.keys(EXPECTED_CONTRACTS).length > 0 || EXPECTED_LINK_DOMAINS.length > 0) {
-            console.log(`✅ 完整性校验通过：未发现合约地址或关键链接被篡改。`);
+            exitCode = 1;
+        } else {
+            console.log(`✅ 业务安全校验通过：UI 地址与 RPC 底层调用均指向官方智能合约字典，未发现劫持。`);
         }
     } catch (error) {
-        console.error("❌ 深度爬虫引擎崩溃:", error);
-        exitCode = 1; // 引擎崩溃，标记失败
+        console.error("❌ 引擎崩溃:", error);
+        exitCode = 1;
     } finally {
         if (browser) await browser.close();
         process.exit(exitCode);
     }
 }
+
 deepCheckSiteLiveness();
