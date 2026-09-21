@@ -5,7 +5,7 @@ const { execSync } = require('child_process');
 // 环境与常量配置
 // ============================================================================
 const FEISHU_WEBHOOK = process.env.FEISHU_WEBHOOK;
-const REPO_NAME = process.env.GITHUB_REPOSITORY || 'tracyyang118/meth_on-chain_Inspection';
+const REPO_NAME = process.env.GITHUB_REPOSITORY || 'meth_online_check';
 
 const MODULES = [
     { name: '预言机存活', title: '🔮 预言机存活 (Oracle Liveness)', file: 'oracle-liveness.js' },
