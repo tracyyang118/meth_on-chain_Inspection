@@ -73,8 +73,8 @@ async function getGithubStatsAndFailedUrls() {
         console.log(`   ├─ 抓取到 ${totalWorkflowRuns} 次运行记录，其中 ${failedRunsCache.length} 次异常。正在逐个深入拉取报错日志 (请耐心等待)...`);
 
         // 3. 深入失败流水线，抓出导致失败的具体模块
-        for (const run of failedRunsCache) {
-            // 👇 2. 加上这句：提示当前正在分析第几个，缓解焦虑
+        for (const [index, run] of failedRunsCache.entries()) {
+            // 👇 现在 index 变量存在了，不会再报错了
             console.log(`      └─ [${index + 1}/${failedRunsCache.length}] 正在分析 Run #${run.run_number}...`);
             let blamedModule = null;
             let isEnvError = false;
@@ -225,12 +225,14 @@ function runModuleWithRetry(moduleName, scriptFile, maxRetries = 3) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         console.log(`🚀 正在现场执行 ${moduleName}...`);
         try {
-            const output = execSync(`node ${scriptFile}`, { encoding: 'utf8', stdio: 'pipe' });
+            // 👇 在这里加上 timeout: 60000 (单位为毫秒，即60秒超时) 👇
+            const output = execSync(`node ${scriptFile}`, { encoding: 'utf8', stdio: 'pipe', timeout: 60000 });
             return { success: true, log: output.trim() };
         } catch (error) {
             const realErrorMsg = (error.stderr || error.stdout || error.message || "未知错误").trim();
+            // 如果是因为 timeout 强制杀死的，error.message 会包含 ETIMEDOUT 相关信息
             if (attempt === maxRetries) {
-                return { success: false, log: `[ERROR_LOG] 达到最大重试次数崩溃。\n\n❌ 崩溃原因:\n${realErrorMsg}` };
+                return { success: false, log: `[ERROR_LOG] 达到最大重试次数崩溃 (或执行超时)。\n\n❌ 崩溃原因:\n${realErrorMsg}` };
             }
             execSync('sleep 5');
         }
