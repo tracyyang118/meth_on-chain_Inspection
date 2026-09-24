@@ -11,7 +11,10 @@ on:
 jobs:
   generate-and-send-report:
     runs-on: ubuntu-latest # 指定运行的系统环境
-
+    permissions:
+      actions: read    # 允许脚本读取 Actions 的运行记录和日志
+      contents: read   # 允许检出代码
+      # 👆 必须加上这段权限声明 👆
     # 👇👇👇 必须加上这三行，告诉系统去 meth-monitor 文件夹里执行命令 👇👇👇
     defaults:
       run:
