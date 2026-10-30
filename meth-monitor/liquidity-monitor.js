@@ -55,7 +55,17 @@ async function checkLiquidityRunRisk() {
 
         if (totalPendingDemand > warningThreshold) {
             const exceededAmount = totalPendingDemand - warningThreshold;
-            const warningMsg = `🚨 [P1 流动性告警] 解押队列出现挤兑风险！\n当前 Pending 解押总需求已突破流动性安全红线。\n超出安全水位: ${ethers.formatEther(exceededAmount)} ETH\n请立刻评估是否需要从信标链发起验证者退出！`;
+            const warningMsg = `🚨 [P1 流动性告警] 解押队列出现挤兑风险！
+📊 解押流动性核对单:
+   ├─ [资金池] LiquidityBuffer 可用余额 : ${ethers.formatEther(bufferBal)} ETH
+   ├─ [解押池] Manager 已备付余额       : ${ethers.formatEther(managerBal)} ETH
+   ├─ [需求端] 当前解押资金总缺口       : ${ethers.formatEther(deficit)} ETH
+   └─ [需求端] Pending 解押总需求额度   : ${ethers.formatEther(totalPendingDemand)} ETH
+   👉 当前挤兑告警阈值界线              : ${ethers.formatEther(warningThreshold)} ETH
+
+当前 Pending 解押总需求已突破流动性安全红线。
+超出安全水位: ${ethers.formatEther(exceededAmount)} ETH
+请立刻评估是否需要从信标链发起验证者退出！`;
             console.warn(warningMsg);
             await triggerAlert(warningMsg);
             exitCode = 1; // 触发挤兑告警，标记失败

@@ -31,7 +31,7 @@ const ABIS = {
     ],
     BridgeEvents: [
         "event ERC20WithdrawalFinalized(address indexed l1Token, address indexed l2Token, address indexed from, address to, uint256 amount, bytes extraData)",
-        "event ERC20DepositInitiated(address indexed l1Token, address indexed l2Token, address indexed from, address to, uint256 amount, bytes extraData)" // [修复] 添加充值事件ABI
+        "event ERC20DepositInitiated(address indexed l1Token, address indexed l2Token, address indexed from, address to, uint256 amount, bytes extraData)"
     ]
 };
 
@@ -127,6 +127,10 @@ async function checkCrossChainPeg() {
     let exitCode = 0;
     let hasAlert = false;
 
+    // 初始化状态，确保包含 consecutiveFailures 字段
+    let state = loadState() || { consecutiveFailures: 0 };
+    if (typeof state.consecutiveFailures !== 'number') state.consecutiveFailures = 0;
+
     try {
         const [l1AdapterBalance, l1MantleBridgeBalance, l2TotalSupply, l1Block, l2Block] = await Promise.all([
             l1MethContract.balanceOf(ADDRESSES.L1Adapter),
@@ -151,80 +155,93 @@ async function checkCrossChainPeg() {
 
         if (actualInTransit < 0n) {
             log(`\n🚨 [P0 致命告警] 跨链桥脱锚！发现 L2 恶意增发！\n物理储备已被击穿，凭空超发: ${ethers.formatEther(supply - totalL1Locked)} mETH`);
-            await triggerAlert(alertContext);
-            process.exit(1);
-        }
-
-        const MAX_PENDING_THRESHOLD = ethers.parseEther("1000.0");
-        if (actualInTransit > MAX_PENDING_THRESHOLD) {
-            log(`\n⚠️ [P1 拥堵告警] 跨链排队资金突破 1000 mETH 红线！\n当前在途积压: ${ethers.formatEther(actualInTransit)} mETH。`);
-            hasAlert = true;
-        }
-
-        const state = loadState();
-        if (!state) {
-            console.log(`\n初始化账本：初次运行，记录当前区块与基准在途资金...`);
-            saveState({ lastL1Block: l1Block, lastL2Block: l2Block, theoreticalInTransit: actualInTransit.toString() });
-            process.exit(0);
-        }
-
-        // [修复] 1. L2 提款发起 (销毁 L2代币) -> 导致在途积压增加
-        const burnFilter = l2MethContract.filters.Transfer(null, ethers.ZeroAddress);
-        const l2BurnEvents = await getBatchedLogsConcurrent(l2MethContract, burnFilter, state.lastL2Block + 1, l2Block, 15, log);
-        let l2BurnAmount = 0n;
-        l2BurnEvents.forEach(e => l2BurnAmount += e.args.value);
-
-        // [修复] 2. L1 提款到账 (释放 L1代币) -> 导致在途积压减少
-        const finalizedFilter = l1BridgeContract.filters.ERC20WithdrawalFinalized(ADDRESSES.L1mETH);
-        const l1FinalizedEvents = await getBatchedLogsConcurrent(l1BridgeContract, finalizedFilter, state.lastL1Block + 1, l1Block, 15, log);
-        let l1FinalizedAmount = 0n;
-        l1FinalizedEvents.forEach(e => l1FinalizedAmount += e.args.amount);
-
-        // [修复] 3. L1 充值发起 (锁定 L1代币) -> 导致在途积压增加
-        const depositFilter = l1BridgeContract.filters.ERC20DepositInitiated(ADDRESSES.L1mETH);
-        const l1DepositEvents = await getBatchedLogsConcurrent(l1BridgeContract, depositFilter, state.lastL1Block + 1, l1Block, 15, log);
-        let l1DepositAmount = 0n;
-        l1DepositEvents.forEach(e => l1DepositAmount += e.args.amount);
-
-        // [修复] 4. L2 充值到账 (铸造 L2代币) -> 导致在途积压减少
-        const mintFilter = l2MethContract.filters.Transfer(ethers.ZeroAddress, null);
-        const l2MintEvents = await getBatchedLogsConcurrent(l2MethContract, mintFilter, state.lastL2Block + 1, l2Block, 15, log);
-        let l2MintAmount = 0n;
-        l2MintEvents.forEach(e => l2MintAmount += e.args.value);
-
-        // 重新计算理论推算值
-        const prevTheoretical = BigInt(state.theoreticalInTransit);
-        const totalAdds = l2BurnAmount + l1DepositAmount;
-        const totalSubs = l1FinalizedAmount + l2MintAmount;
-        const currentTheoretical = prevTheoretical + totalAdds - totalSubs;
-
-        log(`\n   ├─ [上次结转在途] : ${ethers.formatEther(prevTheoretical)} mETH`);
-        log(`   ├─ [+] 期间新增排队 (提款+充值发起) : ${ethers.formatEther(totalAdds)} mETH (${l2BurnEvents.length + l1DepositEvents.length} 笔)`);
-        log(`   ├─ [-] 期间完成核销 (提款+充值到账) : ${ethers.formatEther(totalSubs)} mETH (${l1FinalizedEvents.length + l2MintEvents.length} 笔)`);
-        log(`   👉 [理论在途推算] : ${ethers.formatEther(currentTheoretical)} mETH`);
-
-        const diff = actualInTransit > currentTheoretical ? actualInTransit - currentTheoretical : currentTheoretical - actualInTransit;
-        const TOLERANCE = ethers.parseEther("0.1");
-
-        if (diff > TOLERANCE) {
-            log(`🚨 [P1 账本异常] 发现不可解释的资金差额！\n差异: ${ethers.formatEther(diff)} mETH，请核实！`);
             hasAlert = true;
         } else {
-            console.log(`   ✅ 账本对齐成功！资金双向流水清晰，未发生暗箱扣款。`);
+            const MAX_PENDING_THRESHOLD = ethers.parseEther("1000.0");
+            if (actualInTransit > MAX_PENDING_THRESHOLD) {
+                log(`\n⚠️ [P1 拥堵告警] 跨链排队资金突破 1000 mETH 红线！\n当前在途积压: ${ethers.formatEther(actualInTransit)} mETH。`);
+                hasAlert = true;
+            }
+
+            if (!state.lastL1Block) {
+                console.log(`\n初始化账本：初次运行，记录当前区块与基准在途资金...`);
+                state.lastL1Block = l1Block;
+                state.lastL2Block = l2Block;
+                state.theoreticalInTransit = actualInTransit.toString();
+                saveState(state);
+                process.exit(0);
+            }
+
+            // 1. L2 提款发起 (销毁 L2代币)
+            const burnFilter = l2MethContract.filters.Transfer(null, ethers.ZeroAddress);
+            const l2BurnEvents = await getBatchedLogsConcurrent(l2MethContract, burnFilter, state.lastL2Block + 1, l2Block, 15, log);
+            let l2BurnAmount = 0n;
+            l2BurnEvents.forEach(e => l2BurnAmount += e.args.value);
+
+            // 2. L1 提款到账 (释放 L1代币)
+            const finalizedFilter = l1BridgeContract.filters.ERC20WithdrawalFinalized(ADDRESSES.L1mETH);
+            const l1FinalizedEvents = await getBatchedLogsConcurrent(l1BridgeContract, finalizedFilter, state.lastL1Block + 1, l1Block, 15, log);
+            let l1FinalizedAmount = 0n;
+            l1FinalizedEvents.forEach(e => l1FinalizedAmount += e.args.amount);
+
+            // 3. L1 充值发起 (锁定 L1代币)
+            const depositFilter = l1BridgeContract.filters.ERC20DepositInitiated(ADDRESSES.L1mETH);
+            const l1DepositEvents = await getBatchedLogsConcurrent(l1BridgeContract, depositFilter, state.lastL1Block + 1, l1Block, 15, log);
+            let l1DepositAmount = 0n;
+            l1DepositEvents.forEach(e => l1DepositAmount += e.args.amount);
+
+            // 4. L2 充值到账 (铸造 L2代币)
+            const mintFilter = l2MethContract.filters.Transfer(ethers.ZeroAddress, null);
+            const l2MintEvents = await getBatchedLogsConcurrent(l2MethContract, mintFilter, state.lastL2Block + 1, l2Block, 15, log);
+            let l2MintAmount = 0n;
+            l2MintEvents.forEach(e => l2MintAmount += e.args.value);
+
+            // 重新计算理论推算值
+            const prevTheoretical = BigInt(state.theoreticalInTransit);
+            const totalAdds = l2BurnAmount + l1DepositAmount;
+            const totalSubs = l1FinalizedAmount + l2MintAmount;
+            const currentTheoretical = prevTheoretical + totalAdds - totalSubs;
+
+            log(`\n   ├─ [上次结转在途] : ${ethers.formatEther(prevTheoretical)} mETH`);
+            log(`   ├─ [+] 期间新增排队 (提款+充值发起) : ${ethers.formatEther(totalAdds)} mETH (${l2BurnEvents.length + l1DepositEvents.length} 笔)`);
+            log(`   ├─ [-] 期间完成核销 (提款+充值到账) : ${ethers.formatEther(totalSubs)} mETH (${l1FinalizedEvents.length + l2MintEvents.length} 笔)`);
+            log(`   👉 [理论在途推算] : ${ethers.formatEther(currentTheoretical)} mETH`);
+
+            const diff = actualInTransit > currentTheoretical ? actualInTransit - currentTheoretical : currentTheoretical - actualInTransit;
+            const TOLERANCE = ethers.parseEther("0.1");
+
+            if (diff > TOLERANCE) {
+                log(`🚨 [P1 账本异常] 发现不可解释的资金差额！\n差异: ${ethers.formatEther(diff)} mETH，请核实！`);
+                hasAlert = true;
+            } else {
+                console.log(`   ✅ 账本对齐成功！资金双向流水清晰，未发生暗箱扣款。`);
+            }
         }
 
-        saveState({ lastL1Block: l1Block, lastL2Block: l2Block, theoreticalInTransit: actualInTransit.toString() });
-
-        if (hasAlert) {
-            await triggerAlert(alertContext.trim());
-            exitCode = 1;
-        }
+        // 成功读取区块并执行完主逻辑，准备更新区块高度
+        state.lastL1Block = l1Block;
+        state.lastL2Block = l2Block;
+        state.theoreticalInTransit = actualInTransit.toString();
 
     } catch (error) {
         console.error("❌ 巡检脚本执行异常:", error);
-        await triggerAlert(`L1-L2 跨链对账探针异常，请检查网络节点！错误信息: ${error.message}`);
-        exitCode = 1;
+        alertContext += `\nL1-L2 跨链对账探针异常，请检查网络节点！错误信息: ${error.message}`;
+        hasAlert = true;
     } finally {
+        if (hasAlert) {
+            state.consecutiveFailures += 1;
+            if (state.consecutiveFailures >= 2) {
+                await triggerAlert(alertContext.trim());
+            } else {
+                console.log(`⚠️ 首次检测到异常 (或超出容忍度)，暂不告警，等待下一次运行确认。`);
+            }
+            exitCode = 1;
+        } else {
+            // 本次运行完全健康，计数清零
+            state.consecutiveFailures = 0;
+        }
+
+        saveState(state);
         process.exit(exitCode);
     }
 }
